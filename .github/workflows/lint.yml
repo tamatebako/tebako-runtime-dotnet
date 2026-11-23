@@ -67,6 +67,7 @@ jobs:
           scripts/versions --filter "10.0.404"
           scripts/versions --pin link_unit_release
           scripts/versions --pin contract_version
+          scripts/versions --pin container_version
 
       # The build workflow's plan input: the filtered cross product must
       # be computable and non-empty (an unguarded empty matrix poisons a

@@ -25,8 +25,8 @@
 
 # The ONE per-platform build workflow (tebako-runtime-php's
 # _build-platform.yml port, at this factory's repack scope — no
-# containers, no compile-time signing arms, no publish stage: the legs
-# run runner-native and build nothing but the repack). Called by the
+# compile-time signing arms and no publish stage: the legs build nothing
+# but the repack; publish lands with its own increment). Called by the
 # thin platform triggers (build-<platform>.yml) — never dispatched
 # directly.
 #
@@ -45,14 +45,59 @@
 #   tag, or a SHA (ecosystem SSOT invariant). The run's SOURCE_DATE_EPOCH
 #   (the HEAD commit's epoch, ruby#381's idiom) is computed here too, so
 #   every leg stamps the SAME build timestamp into the image manifest.
-# Stage 2 (build): one leg per (.NET SDK x arch) of this platform:
+# Stage 2 (preflight): the container digest pins (ruby#381's idiom, the
+#   php factory's grammar): contract.yml's container_digests must match
+#   the registry's CURRENT digest for the tag — per (container x leg
+#   arch) — before any leg spends compute; the container legs then pull
+#   name:tag@digest, so the toolchain container can never move under the
+#   matrix.
+# Stage 3 (build): one leg per (.NET SDK x arch) of this platform:
 #   tools/build_runtime (fetch + verify -> stage + prune -> image -> pair
 #   -> sidecars -> read-back -> extracted smoke) -> tools/boot_smoke (the
-#   contract scenarios) -> the runtime-packages-<os>-<arch>-<dotnet>
-#   artifact. The build tooling fetches and sha256-verifies every input
-#   itself (the pinned SDK archive off versions.yml, the pinned wrapper /
-#   tfs CLI / link unit off contract.yml) — there is NO source-build path
-#   for the driver stack here (contract.yml's link_unit_release comment).
+#   contract scenarios + the compute-floor) -> the
+#   runtime-packages-<os>-<arch>-<dotnet> artifact. The build tooling
+#   fetches and sha256-verifies every input itself (the pinned SDK
+#   archive off versions.yml, the pinned wrapper / tfs CLI / link unit
+#   off contract.yml) — there is NO source-build path for the driver
+#   stack here (contract.yml's link_unit_release comment).
+#
+# Leg shapes (the php/openjdk grammars):
+#   linux-gnu    runner-native (ubuntu-24.04 — its image carries ruby,
+#                libicu, libssl: the muxer's own deps).
+#   linux-musl   the container-leg idiom: the gnu host docker-runs the
+#                digest-pinned tpkg-builder-x86_64-linux-musl image per
+#                step — the pinned musl binaries (wrapper, tfs) and the
+#                staged musl SDK execute only under musl libc, and
+#                build_runtime's extracted smoke + the boot smoke execute
+#                them. alpine carries no libicu by default (the .NET
+#                runtime's one non-baked host dep), so the in-container
+#                steps apk-add it — the mirror of the gnu runner's
+#                preinstalled libicu74.
+#   macos        runner-native (macos-15 / macos-15-intel) with an
+#                explicit ruby/setup-ruby (the php grammar: the system
+#                ruby is too old for the tooling). NO macOS deployment
+#                floor rides here — the floor is a compile-time concern
+#                (clang stamps LC_BUILD_VERSION per invocation) and a
+#                repack compiles nothing: the wrapper exe + tfs CLI carry
+#                the product repo's floor, Microsoft's binaries carry
+#                Microsoft's (docs/build-chain.md).
+#   windows      runner-native on the openjdk ucrt idiom: the x64 leg
+#                (windows-latest) sets up msys2 ucrt64 for bsdtar (GNU
+#                tar cannot read the .zip SDK archive; the arm64 leg
+#                extracts with the in-box System32 tar.exe), and the
+#                build step runs the openjdk closed PATH (the toolchain
+#                dirs only, plus the hosted ruby's own dir). The PE/ucrt
+#                materialize path IS the boot: exec-cache materializes
+#                the image's tree host-real, and the boot smoke scrubs
+#                every boot's PATH to the Windows system directories
+#                (the audience-rule condition, the python grammar).
+#
+# The compute-floor (tebako-runtime-python#79's lesson, the php factory's
+# shape): every leg runs a fixed pure-compute C# probe timed INSIDE the
+# runtime. The macos-x86_64 leg ALONE arms COMPUTE_FLOOR_MODE=warn — the
+# live tebako#1095 slow-compute defect on real Intel silicon is the
+# product repo's to fix; every other leg keeps the fail-closed default.
+# REMOVAL CONDITION: delete the warn arm when tebako#1095 closes.
 #
 # The cache holds ONLY the sha256-verified downloads (.build/downloads):
 # a restored entry re-verifies against the pins on use, so a poisoned or
@@ -134,6 +179,8 @@ jobs:
       tebako_version: ${{ steps.emit.outputs.tebako_version }}
       env_matrix: ${{ steps.emit.outputs.env_matrix }}
       dotnet_matrix: ${{ steps.emit.outputs.dotnet_matrix }}
+      container_version: ${{ steps.emit.outputs.container_version }}
+      container_digests: ${{ steps.emit.outputs.container_digests }}
       source_date_epoch: ${{ steps.get-sde.outputs.epoch }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -179,6 +226,12 @@ jobs:
             echo "leg_count=$count"
             if [ "$count" -gt 0 ]; then echo "run=true"; else echo "run=false"; fi
             echo "tebako_version=$(scripts/versions --pin link_unit_release)"
+            echo "container_version=$(scripts/versions --pin container_version)"
+            echo "container_digests=$(ruby -ryaml -rjson -e '
+              d = YAML.load_file("contract.yml")["container_digests"]
+              abort("contract.yml declares no container_digests") if d.nil? || d.empty?
+              print JSON.generate(d)
+            ')"
             echo "env_matrix=$(scripts/compute_matrix.rb --format env)"
             echo "dotnet_matrix=$(scripts/compute_matrix.rb --format dotnets)"
           } >> "$GITHUB_OUTPUT"
@@ -200,21 +253,83 @@ jobs:
           echo "SOURCE_DATE_EPOCH for this run: $sde"
           echo "epoch=$sde" >> "$GITHUB_OUTPUT"
 
+  preflight:
+    name: Verify the toolchain container digests
+    needs: compute
+    if: ${{ needs.compute.outputs.run == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify every referenced container manifest exists at its recorded digest
+        env:
+          LEGS: ${{ needs.compute.outputs.legs }}
+          CONTAINER_VERSION: ${{ needs.compute.outputs.container_version }}
+          CONTAINER_DIGESTS: ${{ needs.compute.outputs.container_digests }}
+        run: |
+          set -u
+          # One record per (container x leg arch): the digest grammar keys
+          # docker arch names (amd64/arm64), the legs key x86_64/arm64.
+          pairs=$(printf '%s' "$LEGS" | jq -r '.include[] | select(.container != null) | .container + " " + .arch' | sed 's/:[^:]* / /' | sort -u)
+          [ -n "$pairs" ] || { echo "no containerized legs; nothing to preflight"; exit 0; }
+          missing=0
+          while read -r ref arch; do
+            [ -n "$ref" ] || continue
+            c="${ref#ghcr.io/tamatebako/}"
+            case "$arch" in
+              x86_64) carch=amd64 ;;
+              arm64)  carch=arm64 ;;
+              *) echo "::error::unknown leg arch $arch"; missing=1; continue ;;
+            esac
+            recorded=$(printf '%s' "$CONTAINER_DIGESTS" | jq -r --arg c "$c" --arg a "$carch" '.[$c][$a] // empty')
+            if [ -z "$recorded" ]; then
+              echo "::error::contract.yml container_digests records no digest for $c/$carch — record the published digest there"
+              missing=1
+              continue
+            fi
+            # ghcr's anonymous-token flow (no docker login on this job):
+            # the manifest GET's Docker-Content-Digest header is the
+            # registry's CURRENT digest for the tag — a retagged image
+            # (a toolchain move under an unchanged tag) shows here.
+            token=$(curl -fsSL "https://ghcr.io/token?scope=repository:tamatebako/${c}:pull" | jq -r .token) || token=
+            live=$(curl -fsSL -o /dev/null -D - \
+              -H "Authorization: Bearer ${token}" \
+              -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json" \
+              "https://ghcr.io/v2/tamatebako/${c}/manifests/${CONTAINER_VERSION}" \
+              | tr -d '\r' | sed -n 's/^[Dd]ocker-[Cc]ontent-[Dd]igest: //p') || live=
+            if [ -z "$live" ]; then
+              echo "::error::missing toolchain container: ${ref}:${CONTAINER_VERSION}"
+              missing=1
+            elif [ "$live" != "$recorded" ]; then
+              echo "::error::${ref}:${CONTAINER_VERSION} moved: recorded $recorded, live $live — a retagged toolchain container under an unchanged tag; repin contract.yml container_digests only as a reviewed toolchain bump"
+              missing=1
+            else
+              echo "ok: ${ref}:${CONTAINER_VERSION} @ $live"
+            fi
+          done <<< "$pairs"
+          [ "$missing" -eq 0 ] || { echo "::error::preflight failed — publish the containers or fix container_version/container_digests in contract.yml"; exit 1; }
+
   build:
     name: ${{ matrix.dotnet }} / ${{ matrix.os }}-${{ matrix.arch }}
-    needs: compute
+    needs: [compute, preflight]
     # An unguarded empty matrix poisons the run conclusion. No always()
-    # here: a FAILED compute must skip the legs outright — the verify job
-    # reports it by name.
+    # here: a FAILED preflight (a moved toolchain container) must skip
+    # the legs outright — the verify job reports it by name.
     if: ${{ needs.compute.outputs.run == 'true' }}
     runs-on: ${{ matrix.host }}
     # A hung leg fails loudly at the cap, never silently (the exec-cache
     # first materialization + the Roslyn compile fixture are the slow
-    # scenarios; the cap carries headroom over both).
-    timeout-minutes: 60
+    # scenarios; the windows legs add Defender scanning on top).
+    timeout-minutes: 90
+    # build_runtime's release-asset fetches ride the GitHub API;
+    # unauthenticated calls share the runner NAT's 60/h budget and die on
+    # 403 flakes. secrets.GITHUB_TOKEN raises the budget; the container
+    # leg forwards it via -e below. SOURCE_DATE_EPOCH is the compute
+    # job's run-wide value (ruby#381); the container leg forwards it too.
+    # COMPUTE_FLOOR_MODE arms the warn tier on the macos-x86_64 leg ALONE
+    # (the header's tebako#1095 block — every other leg fails closed).
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       SOURCE_DATE_EPOCH: ${{ needs.compute.outputs.source_date_epoch }}
+      COMPUTE_FLOOR_MODE: ${{ matrix.os == 'macos' && matrix.arch == 'x86_64' && 'warn' || 'fail' }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.compute.outputs.legs) }}
@@ -232,16 +347,118 @@ jobs:
           key: tebako-dotnet-dl-${{ matrix.os }}-${{ matrix.arch }}-${{ hashFiles('contract.yml', 'versions.yml') }}-v${{ env.CACHE_VER }}
           save-always: true
 
-      # --- build (runner-native: a repack compiles nothing — the SDK
-      # archive unpacks, prunes, images; the wrapper exe and the tfs CLI
-      # arrive as the pinned release's published binaries) ---------------
-      - name: Build the runtime pair
-        run: tools/build_runtime --dotnet "${{ matrix.dotnet }}" --triplet "${{ matrix.triplet }}"
+      # --- provisioning -------------------------------------------------
+      # bsdtar is the only msys2 need on the windows x64 leg (the openjdk
+      # idiom): the SDK archive is a .zip and GNU tar cannot read it.
+      # gcc-libs rides along for any ucrt64 toolchain binary that still
+      # wants the gcc-runtime DLLs. The arm64 leg extracts with the
+      # in-box System32 tar.exe and sets nothing up.
+      - name: Set up MSys2 (ucrt64 bsdtar + gcc runtime)
+        if: matrix.os == 'windows' && matrix.arch == 'x86_64'
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
+        with:
+          msystem: ucrt64
+          path-type: minimal
+          install: mingw-w64-ucrt-x86_64-libarchive mingw-w64-ucrt-x86_64-gcc-libs
+
+      # The macos legs get a modern ruby (the php grammar — the system
+      # ruby predates the tooling's floor). The linux-gnu runner's own
+      # ruby suffices; the windows runners host ruby on PATH (setup-ruby
+      # publishes no windows-arm64 build — tebako run 35501035272).
+      - name: Setup Ruby (the build tooling's interpreter)
+        if: matrix.os == 'macos'
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          ruby-version: '3.3'
+          bundler-cache: false
+
+      # --- build --------------------------------------------------------
+      # The container legs docker-run the digest-pinned tpkg-builder
+      # image per step (the preflight proved the pin). alpine carries no
+      # libicu — the .NET runtime's one non-baked host dep (the gnu
+      # runner's image carries libicu74; this is its musl mirror) — so
+      # the in-container steps install it before the muxer first runs.
+      # The chown at the end hands root-written files back to the runner
+      # user (the php grammar: root in the container writes root-owned
+      # files onto the bind mount).
+      - name: Build the runtime pair (container legs)
+        if: matrix.container != null
+        env:
+          CONTAINER_DIGESTS: ${{ needs.compute.outputs.container_digests }}
+        run: |
+          set -euo pipefail
+          c="${{ matrix.container }}"
+          name="${c%:*}"
+          case "${{ matrix.arch }}" in
+            x86_64) carch=amd64 ;;
+            arm64)  carch=arm64 ;;
+            *) echo "::error::unknown leg arch ${{ matrix.arch }}"; exit 1 ;;
+          esac
+          digest=$(printf '%s' "$CONTAINER_DIGESTS" | jq -r --arg c "${name#ghcr.io/tamatebako/}" --arg a "$carch" '.[$c][$a] // empty')
+          [ -n "$digest" ] || { echo "::error::no recorded container digest for $name/$carch"; exit 1; }
+          image="${c}@${digest}"
+          echo "Building in $image"
+          docker run --rm -e GITHUB_TOKEN -e SOURCE_DATE_EPOCH \
+            -v "${{ github.workspace }}:/mnt/w" -w /mnt/w \
+            "$image" bash -c '
+              set -e
+              apk add --no-cache icu
+              tools/build_runtime --dotnet "${{ matrix.dotnet }}" --triplet "${{ matrix.triplet }}"
+              uid=$(stat -c %u /mnt/w/contract.yml); gid=$(stat -c %g /mnt/w/contract.yml)
+              chown -R "$uid:$gid" /mnt/w/.build /mnt/w/runtime-packages 2>/dev/null || true'
+
+      # The windows legs run the openjdk closed PATH: the runner's
+      # default PATH carries several stray mingw installs, and keeping
+      # them out of DLL/tool resolution removes a whole silent-failure
+      # class — the hosted ruby's own dir is re-added (the tooling IS
+      # ruby). The x64 leg's msys2 dir is D:-anchored; the arm64 runner
+      # is single-disk (C:) and extracts with the in-box System32
+      # tar.exe. --tar flows the matrix row's archiver.
+      - name: Build the runtime pair (native legs)
+        if: matrix.container == null
+        run: |
+          set -euo pipefail
+          case "${{ matrix.os }}-${{ matrix.arch }}" in
+            windows-x86_64)
+              ruby_dir=$(dirname "$(command -v ruby)")
+              export PATH="$ruby_dir:/d/a/_temp/msys64/ucrt64/bin:/c/Program Files/Git/usr/bin:/c/Program Files/Git/cmd:/c/Windows/System32" ;;
+            windows-arm64)
+              ruby_dir=$(dirname "$(command -v ruby)")
+              export PATH="$ruby_dir:/c/Program Files/Git/usr/bin:/c/Program Files/Git/cmd:/c/Windows/System32" ;;
+          esac
+          tools/build_runtime --dotnet "${{ matrix.dotnet }}" --triplet "${{ matrix.triplet }}" --tar "${{ matrix.tar }}"
 
       # --- the gates (a red gate fails the leg; the artifact below still
       # ships for diagnostics, but without the leg-complete marker) -------
       # The boot smoke resolves the exe from TEBAKO_RUNTIME_ROOT.
-      - name: Boot smoke
+      # COMPUTE_FLOOR_MODE rides the job env (the header's warn-tier
+      # block); the container leg forwards it for symmetry even though
+      # its legs never arm warn.
+      - name: Boot smoke (container legs)
+        if: matrix.container != null
+        env:
+          CONTAINER_DIGESTS: ${{ needs.compute.outputs.container_digests }}
+        run: |
+          set -euo pipefail
+          c="${{ matrix.container }}"
+          name="${c%:*}"
+          case "${{ matrix.arch }}" in
+            x86_64) carch=amd64 ;;
+            arm64)  carch=arm64 ;;
+            *) echo "::error::unknown leg arch ${{ matrix.arch }}"; exit 1 ;;
+          esac
+          digest=$(printf '%s' "$CONTAINER_DIGESTS" | jq -r --arg c "${name#ghcr.io/tamatebako/}" --arg a "$carch" '.[$c][$a] // empty')
+          [ -n "$digest" ] || { echo "::error::no recorded container digest for $name/$carch"; exit 1; }
+          docker run --rm -e COMPUTE_FLOOR_MODE \
+            -v "${{ github.workspace }}:/mnt/w" -w /mnt/w \
+            "${c}@${digest}" bash -c '
+              set -e
+              apk add --no-cache icu
+              export TEBAKO_RUNTIME_ROOT=runtime-packages
+              tools/boot_smoke'
+
+      - name: Boot smoke (native legs)
+        if: matrix.container == null
         env:
           TEBAKO_RUNTIME_ROOT: runtime-packages
         run: tools/boot_smoke
@@ -274,23 +491,28 @@ jobs:
   # legs are a dynamic matrix whose check names shift with the catalog
   # (a version bump renames every leg), so protection pins this job's
   # stable per-platform check name ("<platform> / all legs green")
-  # instead of any leg's. Green means: the contract/matrix computed and
-  # every emitted leg succeeded; a platform whose filter emits no legs
-  # gates on compute alone.
+  # instead of any leg's. Green means: the contract/matrix computed, the
+  # container pins proved, and every emitted leg succeeded; a platform
+  # whose filter emits no legs gates on compute alone.
   verify:
     name: all legs green
-    needs: [parity, compute, build]
+    needs: [parity, compute, preflight, build]
     if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Gate on the legs
         run: |
           set -euo pipefail
-          echo "parity:  ${{ needs.parity.result }}"
-          echo "compute: ${{ needs.compute.result }} (run=${{ needs.compute.outputs.run }}, legs=${{ needs.compute.outputs.leg_count }})"
-          echo "build:   ${{ needs.build.result }}"
+          echo "parity:    ${{ needs.parity.result }}"
+          echo "compute:   ${{ needs.compute.result }} (run=${{ needs.compute.outputs.run }}, legs=${{ needs.compute.outputs.leg_count }})"
+          echo "preflight: ${{ needs.preflight.result }}"
+          echo "build:     ${{ needs.build.result }}"
           if [ "${{ needs.compute.result }}" != "success" ]; then
             echo "::error::the contract/matrix computation failed"
+            exit 1
+          fi
+          if [ "${{ needs.compute.outputs.run }}" = "true" ] && [ "${{ needs.preflight.result }}" != "success" ]; then
+            echo "::error::the container preflight failed: ${{ needs.preflight.result }}"
             exit 1
           fi
           if [ "${{ needs.compute.outputs.run }}" = "true" ] && [ "${{ needs.build.result }}" != "success" ]; then

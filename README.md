@@ -14,22 +14,24 @@ conventions follow
 (contract.yml + versions.yml SSOT, the contract gate, the staged
 workflow).
 
-**Status: pre-release skeleton.** One leg — linux-gnu x86_64 — builds
-the runtime pair and passes the boot smoke (`dotnet --info` answers off
-the pair; a hand-written console fixture compiles with `dotnet run`
-inside the pair and executes; the driver-contract error pins hold). The
-chain — fetch/verify → stage/prune → image → pair → sidecars →
-read-back → boot smoke — is implemented in `build/lib/tebako_dotnet_builder/`
-+ `tools/build_runtime` + `tools/boot_smoke` and wired into
-`build-linux-gnu.yml` (a thin trigger over `_build-platform.yml`). **No
-release has been cut**: every increment stays draft-PR-only until the
-whole chain is green end-to-end (the owner's rule).
+**Status: pre-release.** Six legs — linux-gnu x86_64, linux-musl
+x86_64, macOS arm64 + x86_64, windows ucrt x64 + arm64 — build the
+runtime pair and pass the boot smoke (`dotnet --info` answers off the
+pair; a hand-written console fixture compiles with `dotnet run` inside
+the pair and executes; the compute-floor probe times fib(35) inside the
+runtime; the driver-contract error pins hold). The chain — fetch/verify
+→ stage/prune → image → pair → sidecars → read-back → boot smoke — is
+implemented in `build/lib/tebako_dotnet_builder/` +
+`tools/build_runtime` + `tools/boot_smoke` and wired into four thin
+triggers (`build-linux-gnu.yml`, `build-linux-musl.yml`,
+`build-macos.yml`, `build-windows.yml`) over `_build-platform.yml`
+(parity → compute → preflight → build → verify). **No release has been
+cut**: every increment stays draft-PR-only until the whole chain is
+green end-to-end (the owner's rule).
 
-What is missing, each its own increment (see Follow-ups): the other
-triplets (their SDK pins are already recorded in `versions.yml`), the
-publish pipeline + signing + registry render, the Microsoft release
-monitor, the preload-visibility re-evaluation, and the ASP.NET/web
-workload.
+What is missing, each its own increment (see Follow-ups): the publish
+pipeline + signing + registry render, the Microsoft release monitor,
+the preload-visibility re-evaluation, and the ASP.NET/web workload.
 
 ## The driver link: the spec-29 wrapper, not a relink, not a custom host
 
@@ -154,19 +156,62 @@ dotnet-sdk-<v>-<rid>.tar.gz        tebako-runtime-launcher-<line>-<pid>
         read-back (manifest validates, layout/entrypoint present,
         prune policy held) -> extracted-tree smoke (dotnet --info
         names the pinned SDK + runtime) -> tools/boot_smoke
-        (bare/boot/compile/dll/bad-mount/mount-root scenarios)
+        (bare/boot/compile/dll/compute-floor/bad-mount/mount-root
+        scenarios)
 ```
+
+## The boot smoke (tools/boot_smoke)
+
+Every leg runs the same scenario set — bare, boot, compile, dll,
+**compute-floor**, and the named-error trio (bad-mount → 69,
+mount-root-malformed → 65, override-ungranted → 78). The compute-floor
+(tebako-runtime-python#79's lesson: a leg that computes at a fraction of
+the matrix's rate ships green under a boot-only gate) compiles a small
+C# probe inside the pair and times a fixed recursive fib(35) loop with
+`Stopwatch` inside the process — best of three, so boot/mount cost and
+scheduling noise never enter the measurement — against a per-platform
+ceiling (a regression tripwire, never a benchmark). The probe also
+reports `RuntimeInformation.ProcessArchitecture`: the repack's
+slow-compute class is a pair transplanted under emulation, and the
+process architecture must be the leg's own. Mode is `COMPUTE_FLOOR_MODE`:
+`fail` everywhere except the macos-x86_64 leg, which rides `warn` —
+the live tebako#1095 slow-compute defect on real Intel silicon is the
+product repo's to fix (the php factory's carve-out; **removal
+condition**: delete the warn arm when tebako#1095 closes).
+
+On the windows legs every boot additionally runs with PATH scrubbed to
+the Windows system directories (the audience-rule condition — a bare
+windows machine carries no mingw/msys toolchain), and the CLI/exec-cache
+roots ride the smoke's scratch via USERPROFILE/TMP/TEMP. The PE/ucrt
+materialize path is the boot under test: exec-cache materializes the
+image's tree host-real and the muxer + hostfxr + coreclr load from it.
 
 ## Matrix grammar
 
-The env vocabulary lives in `.github/matrix.json` (one row today:
-linux-gnu x86_64 on ubuntu-24.04, runner-native — a repack needs no
-toolchain container); the version catalog lives in `contract.yml` (the
-SSOT) and the source pins in `versions.yml` — versions, tags, and SHAs
-never appear in workflow YAML. The dispatch filters are
-`dotnet_filter=full|tidy|catalog|<list>`, `platform=all|linux-gnu|…`,
+The env vocabulary lives in `.github/matrix.json`; the version catalog
+lives in `contract.yml` (the SSOT) and the source pins in
+`versions.yml` — versions, tags, and SHAs never appear in workflow
+YAML. The dispatch filters are `dotnet_filter=full|tidy|catalog|<list>`,
+`platform=all|linux-gnu|linux-musl|macos|windows`,
 `arch_filter=all|x86_64|arm64` — the php factory's grammar, so the next
-platform's increment adds a matrix row, never a re-derivation.
+platform's increment adds a matrix row, never a re-derivation. The six
+rows today:
+
+| os | arch | host | shape |
+|----|------|------|-------|
+| linux-gnu | x86_64 | ubuntu-24.04 | runner-native (the image carries ruby + libicu74 + libssl3) |
+| linux-musl | x86_64 | ubuntu-24.04 | the container-leg idiom: build + smokes docker-run inside the digest-pinned `tpkg-builder-x86_64-linux-musl` image (the pinned musl binaries execute only under musl libc), `apk add icu` in-leg — the gnu runner's preinstalled libicu74's musl mirror |
+| macos | arm64 | macos-15 | runner-native + an explicit setup-ruby (the system ruby predates the tooling's floor) |
+| macos | x86_64 | macos-15-intel | the same, on real Intel silicon; the compute-floor rides `warn` here ALONE (the live tebako#1095 slow-compute defect — see the boot smoke section) |
+| windows | x86_64 | windows-latest | runner-native on the openjdk ucrt idiom: msys2 ucrt64 supplies bsdtar (GNU tar cannot read the `.zip` SDK archive); the build step runs a closed PATH |
+| windows | arm64 | windows-11-arm | runner-native, no msys2 — the in-box `C:\Windows\System32\tar.exe` reads the zip |
+
+There is **no macOS deployment-floor env** in this factory: the floor is
+a compile-time concern (clang stamps `LC_BUILD_VERSION` per invocation,
+so the php/ruby factories ride `MACOSX_DEPLOYMENT_TARGET` through their
+whole build) and a repack compiles nothing — the wrapper exe and the tfs
+CLI carry the product repo's floor, Microsoft's binaries carry
+Microsoft's.
 
 ## contract.yml — the pins
 
@@ -178,6 +223,12 @@ platform's increment adds a matrix row, never a re-derivation.
   wrapper/tfs pins cross-checked against the release's own SHA256SUMS
   at fetch time; the link-unit pin is its single anchor). Only the
   leg'd platforms carry pins — a pin no leg consumes is config debt.
+- `container_version` + `container_digests` — the musl leg's
+  tpkg-builder container line: the moving family tag plus the immutable
+  ghcr manifest digest per (container × arch), proved live == recorded
+  by the preflight job before any leg spends compute (the ruby#381
+  idiom — a retagged toolchain container under an unchanged tag fails
+  the run before the legs start).
 - `dotnet:` — the version catalog (`catalog` / `full` / `tidy` sets).
   The per-version, per-triplet **source pins** (url + sha256 +
   Microsoft's sha512) live in `versions.yml`;
@@ -199,14 +250,16 @@ platform's increment adds a matrix row, never a re-derivation.
 - `tools/build_runtime` — the build entry point (fetch → verify →
   stage/prune → image → pair → sidecars → read-back → extracted smoke).
 - `tools/boot_smoke` — the post-build acceptance gate (bare/boot/
-  compile/dll/bad-mount/mount-root-malformed/override-ungranted).
+  compile/dll/compute-floor/bad-mount/mount-root-malformed/
+  override-ungranted).
 - `build/lib/tebako_dotnet_builder/` — the build model (Contract, Pins,
   Platform, Fetcher, Toolchain, ImageBuilder, Builder).
 - `manifests/` — the tier-1 runtime manifest + the layout declaration
   templates the build renders into the image.
 - `.github/workflows/_build-platform.yml` — the one per-platform
-  workflow (parity → compute → build → verify), called by the thin
-  trigger `build-linux-gnu.yml`.
+  workflow (parity → compute → preflight → build → verify), called by
+  the thin triggers (`build-linux-gnu.yml`, `build-linux-musl.yml`,
+  `build-macos.yml`, `build-windows.yml`).
 - `.github/workflows/lint.yml` — the static gate: schema validation,
   catalog/matrix resolution, the `ruby -c` sweep, YAML/JSON parse
   checks.
@@ -215,38 +268,56 @@ platform's increment adds a matrix row, never a re-derivation.
 ## Local build
 
 `tools/build_runtime` runs anywhere Ruby + curl + tar exist for the
-leg's own platform. On non-linux hosts the linux leg runs in docker
-(the host's linux/amd64 platform — e.g. `docker run --platform
-linux/amd64` on arm64 macs):
+leg's own platform. The macOS legs build natively on a mac of the
+matching arch (an arm64 mac also runs the x86_64 leg under Rosetta).
+The linux legs run in docker on non-linux hosts (the host's
+linux/amd64 platform — e.g. `docker run --platform linux/amd64` on
+arm64 macs); the musl leg rides the same digest-pinned container CI
+uses:
 
 ```sh
+# linux-gnu (the gnu runner's local mirror — ubuntu carries the muxer's deps)
 docker run --rm --platform linux/amd64 \
   -v "$PWD:/work" -w /work ubuntu:24.04 bash -c '
     apt-get update -qq && apt-get install -y -qq ruby curl ca-certificates tar libicu74 libssl3 >/dev/null
     tools/build_runtime --dotnet 10.0.404 --triplet x86_64-linux-gnu
     TEBAKO_RUNTIME_ROOT=runtime-packages tools/boot_smoke'
+
+# linux-musl (the pinned CI container + the in-leg icu install)
+docker run --rm --platform linux/amd64 \
+  -v "$PWD:/mnt/w" -w /mnt/w \
+  ghcr.io/tamatebako/tpkg-builder-x86_64-linux-musl:v1@sha256:e933e07cc7320b53fd558a3ede20728530bb0b1fbcf8100efc55f5ac80b97e2d \
+  bash -c '
+    apk add --no-cache icu
+    tools/build_runtime --dotnet 10.0.404 --triplet x86_64-linux-musl
+    TEBAKO_RUNTIME_ROOT=runtime-packages tools/boot_smoke'
 ```
+
+(The digest above is illustrative — read the live pin from
+`contract.yml container_digests`; the container runs as root, so `chown`
+the `.build/` + `runtime-packages/` trees back to your user afterwards,
+the workflow's grammar.)
 
 ## Follow-ups
 
-1. The remaining triplets: linux-musl x86_64, macOS arm64 + x86_64,
-   windows ucrt x64 + arm64 (their SDK pins are already recorded in
-   `versions.yml`; each increment adds its matrix row, its toolchain
-   pins in `contract.yml`, and its thin `build-<platform>.yml` trigger).
-   linux-arm64 / linux-musl-arm64 SDK builds exist upstream but are
-   unpinned — no leg demands them yet.
-2. The publish pipeline (per-leg publish+sign via the tebako-release
+1. The publish pipeline (per-leg publish+sign via the tebako-release
    gem, the audit, the registry render + bot PR) and the first release
-   — the owner's explicit act, never the agent's.
-3. The Microsoft release monitor (the releases-index watch + pin-bump
+   — the owner's explicit act, never the agent's. This is the next
+   increment; the legs already emit every byte it consumes (the pair,
+   the sidecars, the release shard).
+2. The Microsoft release monitor (the releases-index watch + pin-bump
    PRs).
-4. The preload-visibility re-evaluation (measurements first; the
+3. The preload-visibility re-evaluation (measurements first; the
    exec-cache first-boot cost is recorded above).
-5. The ASP.NET/web workload increment (re-adds the pruned packs).
-6. The payload lane: app payloads pressed against this runtime
+4. The ASP.NET/web workload increment (re-adds the pruned packs).
+5. The payload lane: app payloads pressed against this runtime
    (single-file/framework-dependent dll delivery through the driver's
    entry materialization — pinned by evidence in that increment), and
    the hostfxr custom-apphost evaluation for app-side single-exe
    embedding.
+6. linux-arm64 / linux-musl-arm64 legs: Microsoft ships those SDK
+   builds, but no leg demands them yet — their increment records the
+   pins and adds the matrix rows (the arm64 linux containers exist
+   beside the x86_64 one).
 7. The boot-contract parity `spec/` suite against the driver's contract
    suite where the cases overlap.

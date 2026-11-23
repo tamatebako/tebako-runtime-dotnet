@@ -39,8 +39,9 @@ everything below:
 ## The staged hierarchy
 
 One reusable workflow, `_build-platform.yml` (the php factory's port at
-the repack scope), called by the thin triggers (`build-linux-gnu.yml`
-today). Stages:
+the repack scope), called by the thin triggers (`build-linux-gnu.yml`,
+`build-linux-musl.yml`, `build-macos.yml`, `build-windows.yml`).
+Stages:
 
 1. **parity** — the contract gate's driver-source parity arm needs the
    pinned release's `lib.rs` off raw.githubusercontent.com, a fetch
@@ -57,13 +58,43 @@ today). Stages:
    from these outputs — workflow YAML never hardcodes a version, a tag,
    or a SHA. The run's `SOURCE_DATE_EPOCH` (the HEAD commit's epoch,
    the ruby#381 idiom) is computed here and exported to the legs.
-3. **build** — one leg per (.NET SDK × arch): `tools/build_runtime` →
+3. **preflight** — the container digest pins (the ruby#381 idiom, the
+   php factory's grammar): contract.yml's `container_digests` must
+   equal the registry's CURRENT digest for `container_version` — per
+   (container × leg arch), read through ghcr's anonymous-token flow —
+   before any leg spends compute. A retagged toolchain container under
+   an unchanged tag fails HERE, never mid-leg.
+4. **build** — one leg per (.NET SDK × arch): `tools/build_runtime` →
    `tools/boot_smoke` → the `runtime-packages-<os>-<arch>-<dotnet>`
-   artifact. The legs run **runner-native** (a repack compiles nothing
-   — no tpkg-builder container exists in this repo; the leg needs only
-   the runner's ruby/curl/tar plus the .NET muxer's own runtime deps,
-   which ubuntu-24.04 carries).
-4. **verify** — the terminal aggregate and the branch-protection gate
+   artifact. Leg shapes:
+   - **linux-gnu** — runner-native on ubuntu-24.04 (its image carries
+     ruby, libicu74, libssl3: the muxer's own deps).
+   - **linux-musl** — the container-leg idiom (the php/openjdk
+     grammar): the gnu host docker-runs the digest-pinned
+     `tpkg-builder-x86_64-linux-musl` image per step — the pinned musl
+     binaries (wrapper, tfs) and the staged musl SDK execute only under
+     musl libc, and build_runtime's extracted smoke + the boot smoke
+     execute them. alpine carries no libicu by default (the .NET
+     runtime's one non-baked host dep), so the in-container steps
+     `apk add icu` — the gnu runner's preinstalled libicu74's musl
+     mirror.
+   - **macos** — runner-native (macos-15, macos-15-intel) with an
+     explicit setup-ruby (the system ruby predates the tooling's
+     floor). NO macOS deployment floor rides here: the floor is a
+     compile-time concern (clang stamps `LC_BUILD_VERSION` per
+     invocation — the php/ruby factories ride
+     `MACOSX_DEPLOYMENT_TARGET` through their whole build) and a repack
+     compiles nothing; the wrapper exe + tfs CLI carry the product
+     repo's floor, Microsoft's binaries carry Microsoft's.
+   - **windows** — runner-native on the openjdk ucrt idiom: the x64 leg
+     (windows-latest) sets up msys2 ucrt64 for bsdtar (GNU tar cannot
+     read the `.zip` SDK archive); the arm64 leg (windows-11-arm)
+     extracts with the in-box System32 tar.exe and sets nothing up.
+     The build step runs a closed PATH (the toolchain dirs only, plus
+     the hosted ruby's own dir — the openjdk grammar; setup-ruby
+     publishes no windows-arm64 build, so the legs ride the runners'
+     hosted ruby).
+5. **verify** — the terminal aggregate and the branch-protection gate
    (the build legs are a dynamic matrix whose check names shift with
    the catalog, so protection pins this job's stable check name).
 
@@ -150,7 +181,8 @@ pin bump.
 ## The boot smoke (tools/boot_smoke)
 
 The post-build acceptance gate (stdlib-only; scenarios in the tool's
-header):
+header). Every leg runs the SAME set — the windows legs included, where
+the PE/ucrt materialize path IS the boot under test:
 
 - `bare` — no `TEBAKO_RUNTIME_IMAGE`: the wrapper names the missing env
   image (the pair is two artifacts; a bare wrapper is a named error).
@@ -165,6 +197,24 @@ header):
   version + RID.
 - `dll` — the fixture built to a dll and executed directly
   (`dotnet <dll>`) — the app-payload execution shape.
+- `compute-floor` — tebako-runtime-python#79's lesson, the php
+  factory's shape: a boot-only gate ships a leg that computes at a
+  fraction of the matrix's rate. A small C# probe builds inside the
+  pair, then times a fixed recursive fib(35) with `Stopwatch` INSIDE
+  the process (best of three — boot/mount cost and one-off scheduling
+  noise never enter the measurement) against a per-platform ceiling
+  (`COMPUTE_FLOOR_SECONDS` in the tool — a regression tripwire, never
+  a benchmark bound; a platform with no recorded ceiling is a named
+  error). The probe also reports
+  `RuntimeInformation.ProcessArchitecture` — the repack's slow-compute
+  class is a pair transplanted under emulation (an x64 muxer on an
+  arm64 leg), so the process architecture must be the leg's OWN. Mode
+  is `COMPUTE_FLOOR_MODE`: `fail` (the default) trips the leg on a
+  breached floor; `warn` — armed by the workflow on the macos-x86_64
+  leg ALONE, where the link-unit line carries the live tebako#1095
+  slow-compute defect on real Intel silicon — prints a `::warning::`
+  and keeps the leg green. REMOVAL CONDITION: the macos-x86_64 leg
+  reverts to fail-closed when tebako#1095 closes.
 - `bad-mount` — an unavailable payload image exits 69 naming the image.
 - `mount-root-malformed` — a relative `TEBAKO_MOUNT_ROOT` exits 65.
 - `override-ungranted` — an absolute `TEBAKO_MOUNT_ROOT` against the
@@ -172,10 +222,16 @@ header):
   default).
 
 Every scenario runs with a scrubbed env (no inherited `TEBAKO_*` /
-`LD_*` / `DYLD_*`), a scratch HOME + NuGet cache, and a stable scratch
-TMPDIR (the driver-named exec cache materializes once per smoke run).
-The CLI noise knobs (`DOTNET_CLI_TELEMETRY_OPTOUT`, `DOTNET_NOLOGO`,
-`DOTNET_SKIP_FIRST_TIME_EXPERIENCE`) are always set.
+`DOTNET_*` / `LD_*` / `DYLD_*`), a scratch HOME + NuGet cache, and a
+stable scratch TMPDIR (the driver-named exec cache materializes once
+per smoke run). The CLI noise knobs (`DOTNET_CLI_TELEMETRY_OPTOUT`,
+`DOTNET_NOLOGO`, `DOTNET_SKIP_FIRST_TIME_EXPERIENCE`) are always set.
+On windows the scrub additionally forces every boot's PATH to the
+Windows system directories (System32 + the Windows root + Wbem — the
+audience-rule condition, the python factory's grammar), and the
+hermetic roots ride the native spellings (USERPROFILE for the CLI home,
+TMP/TEMP for the exec cache — native windows processes ignore
+HOME/TMPDIR).
 
 ## The cache architecture
 
@@ -193,24 +249,30 @@ UNCHANGED pins, and say why in the workflow comment.
 
 ## The determinism notes
 
-Born pinned: both input pin layers above, and `SOURCE_DATE_EPOCH`
-follows the ruby#381 idiom (the compute job derives ONE epoch from the
-HEAD commit under a full-history checkout; every leg stamps it into the
-image manifest's `identity.created`, so a same-commit re-run stamps
-identically). The packed image's own metadata is deterministic the same
-way (tfs-cli's mkimage honors the variable).
+Born pinned: both input pin layers above, the container line
+(`container_version` the moving family tag + `container_digests` the
+immutable per-arch ghcr manifest digests — the preflight proves
+recorded == live before any leg spends compute), and
+`SOURCE_DATE_EPOCH` follows the ruby#381 idiom (the compute job derives
+ONE epoch from the HEAD commit under a full-history checkout; every leg
+stamps it into the image manifest's `identity.created`, so a
+same-commit re-run stamps identically). The stamp is fail-closed: a
+malformed `SOURCE_DATE_EPOCH` is a named build error (exit 64), never
+a silent wall-clock fallback; unset falls to epoch 0 (the tfs-cli
+mkimage convention), so a local build is deterministic too.
 
 ## Where each value lives (SSOT)
 
-- Contract version + product-line pin + toolchain digests + version
-  catalog: `contract.yml` (+ `schema/contract.schema.yml`).
+- Contract version + product-line pin + toolchain digests + container
+  line + version catalog: `contract.yml` (+ `schema/contract.schema.yml`).
 - SDK url/sha256/sha512 pins per triplet: `versions.yml` (cross-locked
   to the catalog and to the matrix legs by
   `scripts/check_contract.rb`).
-- Env vocabulary (host/os/arch): `.github/matrix.json`.
+- Env vocabulary (host/os/arch/container/tar): `.github/matrix.json`.
 - The triplet ↔ asset-platform ↔ RID grammar:
   `build/lib/tebako_dotnet_builder/platform.rb` (mirroring tpkg's
   owner-side tables).
 - The prune policy: `build/lib/tebako_dotnet_builder/image_builder.rb`.
-- The boot-contract scenarios: `tools/boot_smoke`.
+- The boot-contract scenarios + the compute-floor ceilings:
+  `tools/boot_smoke`.
 - This architecture: `docs/build-chain.md`.
