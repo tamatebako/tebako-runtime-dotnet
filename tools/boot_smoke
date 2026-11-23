@@ -1,0 +1,332 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Copyright (c) 2026 [Ribose Inc](https://www.ribose.com).
+# All rights reserved.
+# This file is a part of tamatebako
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+# ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+# TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+# PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS
+# BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+# Boot smoke for a built tebako .NET runtime pair (the php factory's
+# boot_smoke role, at the repack runtime's scope — stdlib-only):
+# boots the wrapper exe against its sibling env image and asserts the
+# driver contract end to end. Scenarios:
+#
+#   bare                 no image: the wrapper NAMES the bare boot
+#                        (TEBAKO_RUNTIME_IMAGE unset — the pair contract
+#                        is two artifacts; the wrapper without its env
+#                        image is a named error, never a shrug)
+#   boot                 TEBAKO_RUNTIME_IMAGE handoff: `dotnet --info`
+#                        answers off the pair, naming the pinned SDK
+#                        version, the carried Microsoft.NETCore.App
+#                        shared runtime, and the leg's RID — proof the
+#                        exec-cache materialization + the muxer's
+#                        self-location work end to end
+#   compile              a hand-written console fixture (no template
+#                        restore): `dotnet run --project … -c Release`
+#                        inside the pair — MSBuild + Roslyn + the
+#                        OFFLINE framework resolution against the
+#                        bundled packs (Microsoft.NETCore.App.Ref +
+#                        the per-RID apphost pack), then the compiled
+#                        app executes and reports its own runtime
+#   dll                  the compile fixture's built dll executed
+#                        directly (`dotnet <dll>`) — the app-payload
+#                        execution shape
+#   bad-mount            --tebako-image <missing>:-:/nope -> exit 69
+#                        (the unavailable image, named on stderr)
+#   mount-root-malformed TEBAKO_MOUNT_ROOT=relative/path -> exit 65
+#   override-ungranted   TEBAKO_MOUNT_ROOT=<abs> against the dotnet
+#                        image -> exit 78 (the image grants no override
+#                        — the closed default, spec 00 §9)
+#
+# Usage:
+#   tools/boot_smoke [--runtime-root DIR | --exe PATH]
+#                    [--scenario all|bare|boot|compile|dll|bad-mount|
+#                               mount-root-malformed|override-ungranted]
+#
+# Exit codes: 0 green · 141 usage/resolution · 143 a scenario failed.
+
+require "fileutils"
+require "open3"
+require "optparse"
+require "tmpdir"
+require "yaml"
+
+REPO_ROOT = File.expand_path("..", __dir__).freeze
+$LOAD_PATH.unshift(File.join(REPO_ROOT, "build", "lib"))
+
+require "tebako_dotnet_builder"
+
+# The exec-cache first materialization copies the pruned SDK tree
+# (~0.5 GB) once per TMPDIR; later boots reuse the content-keyed cache.
+# The compile scenario adds MSBuild/Roslyn on top. Error scenarios exit
+# before any of that.
+BOOT_TIMEOUT = 900
+ERROR_TIMEOUT = 60
+
+IMAGE_SUFFIXES = %w[.tfs .dwarfs].freeze
+MARKER_SUFFIXES = %w[.sha256 .json .yaml .asc].freeze
+NON_EXECUTABLE_SUFFIXES = (IMAGE_SUFFIXES + MARKER_SUFFIXES).freeze
+
+# The child env is REPLACED, not inherited: any tebako/preload leftovers
+# a host setup would leak in are scrubbed (the ruby factory's msys
+# GEM_HOME lesson).
+ENV_SCRUBBED = %w[LD_PRELOAD DYLD_INSERT_LIBRARIES DYLD_FALLBACK_LIBRARY_PATH].freeze
+
+def usage_error(message)
+  warn "boot_smoke: #{message}"
+  exit 141
+end
+
+options = { runtime_root: ENV.fetch("TEBAKO_RUNTIME_ROOT", nil), exe: nil, scenario: "all" }
+OptionParser.new do |opts|
+  opts.banner = "Usage: tools/boot_smoke [options]"
+  opts.on("--runtime-root DIR", "Directory holding exactly one tebako-runtime-* executable") { |v| options[:runtime_root] = v }
+  opts.on("--exe PATH", "The runtime executable itself (wins over --runtime-root)") { |v| options[:exe] = v }
+  opts.on("--scenario NAME", "One scenario to run (default: all)") { |v| options[:scenario] = v }
+  opts.on("-h", "--help") do
+    puts opts
+    exit 0
+  end
+end.parse!
+
+def resolve_executable(root, exe)
+  return File.expand_path(exe) if exe && File.file?(exe)
+  usage_error("--exe #{exe.inspect} is not a file") if exe
+  usage_error("no --runtime-root/--exe (TEBAKO_RUNTIME_ROOT unset)") if root.to_s.empty? || !File.exist?(root)
+  return File.expand_path(root) if File.file?(root)
+
+  candidates = Dir.glob(File.join(root, "tebako-runtime-*"))
+                  .select { |path| File.file?(path) && !NON_EXECUTABLE_SUFFIXES.include?(File.extname(path)) }
+  usage_error("no tebako runtime executable under #{root}") if candidates.empty?
+  usage_error("several runtime executables under #{root} (#{candidates.join(", ")})") if candidates.length > 1
+
+  File.expand_path(candidates.first)
+end
+
+# One scratch tree for the whole smoke: the hermetic exec-cache TMPDIR
+# (TEBAKO_EXEC_CACHE is the driver's EXPORT, never an input — naming
+# TMPDIR is the hermetic shape, the openjdk grammar), the dotnet CLI's
+# HOME, and the compile fixture all live here.
+SCRATCH = Dir.mktmpdir("tebako-dotnet-boot-smoke")
+at_exit { FileUtils.rm_rf(SCRATCH) }
+
+def boot(executable, argv, env_extra, timeout: BOOT_TIMEOUT)
+  Dir.mktmpdir("tebako-dotnet-boot-cwd") do |cwd|
+    env = ENV_SCRUBBED.to_h { |key| [key, nil] }
+    ENV.each_key { |key| env[key] = nil if key.start_with?("TEBAKO_") }
+    env.merge!(dotnet_cli_env.merge(env_extra))
+    # popen3 + a wait-deadline poll, NOT Timeout.timeout around capture3:
+    # the Timeout unwind lands in popen3's ensure (wait_thr.join on the
+    # still-immortal child) and blocks forever there (the tebako#527 gnu
+    # shape). Past the deadline the child is hard-killed and reaped
+    # BEFORE any unwind touches popen3's ensure.
+    out = err = status = nil
+    Open3.popen3(env, executable, *argv, chdir: cwd) do |stdin, stdout, stderr, wait_thr|
+      stdin.close
+      readers = [stdout, stderr].map { |io| Thread.new { io.read } }
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+      loop do
+        break if wait_thr.join(0.1)
+        next unless Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+        Process.kill("KILL", wait_thr.pid)
+        wait_thr.join
+        readers.each(&:kill)
+        return ["", "boot_smoke: runtime did not exit within #{timeout}s (hard-killed)", nil]
+      end
+      out, err = readers.map(&:value)
+      status = wait_thr.value
+    end
+    [out, err, status]
+  end
+end
+
+# The hermetic dotnet CLI env (every scenario): no telemetry, no logo,
+# no first-run side effects; the CLI's HOME/NuGet caches and the
+# driver-named exec cache live under the smoke's scratch tree.
+def dotnet_cli_env
+  home = File.join(SCRATCH, "home")
+  nuget = File.join(SCRATCH, "nuget")
+  FileUtils.mkdir_p([home, nuget])
+  {
+    "HOME" => home,
+    "NUGET_PACKAGES" => nuget,
+    "TMPDIR" => SCRATCH,
+    "DOTNET_CLI_TELEMETRY_OPTOUT" => "1",
+    "DOTNET_NOLOGO" => "1",
+    "DOTNET_SKIP_FIRST_TIME_EXPERIENCE" => "1"
+  }
+end
+
+$failures = 0
+def check(name, ok, detail)
+  if ok
+    puts "ok   #{name}"
+  else
+    puts "FAIL #{name}: #{detail}"
+    $failures += 1
+  end
+end
+
+def expect_exit(name, out, err, status, code)
+  check(name, status&.exitstatus == code,
+        "expected exit #{code}, got #{status&.exitstatus.inspect}\nstdout: #{out}\nstderr: #{err}")
+end
+
+def expect_ok(name, out, err, status, marker)
+  ok = status&.exitstatus&.zero? && out.include?(marker)
+  check(name, ok, "expected exit 0 + #{marker.inspect}\nstdout: #{out}\nstderr: #{err}")
+end
+
+# The compile fixture: a hand-written console project (no `dotnet new`
+# template restore — the fixture is two files). net<line> tracks the
+# pinned SDK's line; the app reports its own framework + RID so the
+# assertion is content, not exit code.
+def compile_fixture(dir, line)
+  File.write(File.join(dir, "hello.csproj"), <<~XML)
+    <Project Sdk="Microsoft.NET.Sdk">
+      <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net#{line}.0</TargetFramework>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+      </PropertyGroup>
+    </Project>
+  XML
+  File.write(File.join(dir, "Program.cs"), <<~CS)
+    using System.Runtime.InteropServices;
+    Console.WriteLine($"TEBAKO-DOTNET-OK {RuntimeInformation.FrameworkDescription} {RuntimeInformation.RuntimeIdentifier}");
+  CS
+end
+
+KNOWN_SCENARIOS = %w[bare boot compile dll bad-mount mount-root-malformed override-ungranted].freeze
+
+def selected_scenarios(only)
+  return KNOWN_SCENARIOS.dup if only == "all"
+  return [only] if KNOWN_SCENARIOS.include?(only)
+
+  usage_error("unknown scenario '#{only}' (known: #{KNOWN_SCENARIOS.join(", ")})")
+end
+
+def run_scenarios(executable, image, version, runtime_version, rid, line, selected)
+  selected.each do |scenario|
+    case scenario
+    when "bare"
+      out, err, st = boot(executable, ["--tebako-entry", "dotnet", "--info"], {}, timeout: ERROR_TIMEOUT)
+      check("bare: the wrapper names the missing env image",
+            !st&.exitstatus&.zero? && err.include?("TEBAKO_RUNTIME_IMAGE"),
+            "exit #{st&.exitstatus.inspect}\nstdout: #{out}\nstderr: #{err}")
+    when "boot"
+      out, err, st = boot(executable, ["--tebako-entry", "dotnet", "--info"],
+                          { "TEBAKO_RUNTIME_IMAGE" => image })
+      expect_ok("boot: dotnet --info answers off the pair", out, err, st, ".NET SDK")
+      check("boot: the pinned SDK version answers", out.include?("Version:        #{version}") || out.include?(version),
+            "--info output:\n#{out}")
+      check("boot: the carried shared runtime answers", out.include?("Microsoft.NETCore.App #{runtime_version}"),
+            "--info output:\n#{out}")
+      check("boot: the leg's RID answers", out.include?("RID:         #{rid}") || out.include?(rid),
+            "--info output:\n#{out}")
+    when "compile"
+      fixture = File.join(SCRATCH, "fixture")
+      FileUtils.mkdir_p(fixture)
+      compile_fixture(fixture, line)
+      out, err, st = boot(executable,
+                          ["--tebako-entry", "dotnet", "run", "--project", fixture, "-c", "Release"],
+                          { "TEBAKO_RUNTIME_IMAGE" => image })
+      expect_ok("compile: dotnet run builds + executes the fixture inside the pair",
+                out, err, st, "TEBAKO-DOTNET-OK")
+      check("compile: the app reports the carried runtime", out.include?(runtime_version),
+            "stdout: #{out}\nstderr: #{err}")
+      check("compile: the app reports the leg's RID", out.include?(rid),
+            "stdout: #{out}\nstderr: #{err}")
+    when "dll"
+      fixture = File.join(SCRATCH, "fixture")
+      unless File.file?(File.join(fixture, "hello.csproj"))
+        check("dll", false, "the compile scenario did not leave its fixture — run compile first (or all)")
+        next
+      end
+
+      out_dir = File.join(SCRATCH, "fixture-out")
+      out, err, st = boot(executable,
+                          ["--tebako-entry", "dotnet", "build", fixture, "-c", "Release", "-o", out_dir],
+                          { "TEBAKO_RUNTIME_IMAGE" => image })
+      check("dll: dotnet build produced the fixture dll", st&.exitstatus&.zero? && File.file?(File.join(out_dir, "hello.dll")),
+            "exit #{st&.exitstatus.inspect}\nstdout: #{out}\nstderr: #{err}")
+      out, err, st = boot(executable,
+                          ["--tebako-entry", "dotnet", File.join(out_dir, "hello.dll")],
+                          { "TEBAKO_RUNTIME_IMAGE" => image })
+      expect_ok("dll: dotnet <dll> executes the built fixture", out, err, st, "TEBAKO-DOTNET-OK")
+    when "bad-mount"
+      missing = File.join(SCRATCH, "no-such-image.tfs")
+      out, err, st = boot(executable,
+                          ["--tebako-image", "#{missing}:-:/nope", "--tebako-entry", "dotnet", "--info"],
+                          { "TEBAKO_RUNTIME_IMAGE" => image }, timeout: ERROR_TIMEOUT)
+      expect_exit("bad-mount", out, err, st, 69)
+      check("bad-mount: the image is named", err.include?(missing), "stderr: #{err}")
+    when "mount-root-malformed"
+      out, err, st = boot(executable, ["--tebako-entry", "dotnet", "--info"],
+                          { "TEBAKO_RUNTIME_IMAGE" => image, "TEBAKO_MOUNT_ROOT" => "relative/path" },
+                          timeout: ERROR_TIMEOUT)
+      expect_exit("mount-root-malformed", out, err, st, 65)
+      check("mount-root-malformed: the variable is named", err.include?("TEBAKO_MOUNT_ROOT"), "stderr: #{err}")
+    when "override-ungranted"
+      out, err, st = boot(executable, ["--tebako-entry", "dotnet", "--info"],
+                          { "TEBAKO_RUNTIME_IMAGE" => image,
+                            "TEBAKO_MOUNT_ROOT" => File.join(SCRATCH, "elsewhere") },
+                          timeout: ERROR_TIMEOUT)
+      expect_exit("override-ungranted (the image grants no override — the closed default)", out, err, st, 78)
+    end
+  end
+end
+
+executable = resolve_executable(options[:runtime_root], options[:exe])
+image = "#{executable.sub(/\.exe\z/, "")}.tfs"
+usage_error("no sibling env image #{image}") unless File.file?(image)
+
+contract = TebakoDotnetBuilder::Contract.new(File.join(REPO_ROOT, "contract.yml"))
+pins = TebakoDotnetBuilder::Pins.new(File.join(REPO_ROOT, "versions.yml"))
+stem = File.basename(executable).sub(/\.exe\z/, "")
+rest = stem.sub(/\Atebako-runtime-\d+\.\d+\.\d+-dotnet-/, "")
+usage_error("the exe name #{stem} is not the runtime naming grammar") if rest == stem
+# rest is "<sdk-version>-<asset-platform>"; the asset platform is the
+# longest known suffix (windows-ucrt64 nests no arch segment).
+asset_platform = TebakoDotnetBuilder::Platform::ASSET_PLATFORMS.values
+                 .select { |ap| rest.end_with?("-#{ap}") }.max_by(&:length)
+usage_error("the exe name #{stem} carries no known asset platform") if asset_platform.nil?
+version = rest.delete_suffix("-#{asset_platform}")
+usage_error("the exe's SDK version #{version} is not in contract.yml's catalog") unless contract.catalog.include?(version)
+triplet = TebakoDotnetBuilder::Platform::ASSET_PLATFORMS.key(asset_platform)
+usage_error("no spec 03 triplet for asset platform #{asset_platform}") if triplet.nil?
+rid = pins.source(version, triplet).rid
+line = pins.line(version)
+runtime_version = pins.runtime_version(version)
+
+puts "-- Boot smoke: #{executable} (#{asset_platform}, SDK #{version}, runtime #{runtime_version})"
+run_scenarios(executable, image, version, runtime_version, rid, line, selected_scenarios(options[:scenario]))
+
+if $failures.positive?
+  puts "#{$failures} scenario check(s) failed"
+  exit 143
+end
+puts "boot smoke: all green"
+exit 0

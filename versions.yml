@@ -1,0 +1,92 @@
+# Copyright (c) 2026 [Ribose Inc](https://www.ribose.com).
+# All rights reserved.
+# This file is a part of tamatebako
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+# ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+# TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+# PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS
+# BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+# The .NET SDK source pins — this factory's trust anchor. There is NO
+# tamatebako source factory for .NET (and there never will be in this
+# shape): Microsoft ships compiled per-RID SDK builds, so this factory
+# REPACKS Microsoft's published archives (the node/openjdk grammar — no
+# compilation). The sha256 recorded beside each url is verified at fetch
+# time (a mismatch is a hard named error, never a refetch loop past the
+# bounded retry); Microsoft's own published digest is sha512, recorded
+# alongside as upstream_sha512 — the pin-time cross-check anchor (each
+# recorded sha256 was computed from bytes first verified against it).
+#
+# Upstream index: https://builds.dotnet.microsoft.com/dotnet/release-metadata/
+# releases-index.json → the 10.0 channel's releases.json (the latest LTS
+# line, pinned 2026-11-23; release-type lts, support-phase active).
+#
+# contract.yml's dotnet.catalog selects which pinned versions the matrix
+# builds; scripts/check_contract.rb locks the two (a catalog version with
+# no pin, or a pin the catalog never builds, is a config bug).
+#
+# Per-triplet availability (verified against the 10.0 channel's
+# releases.json 2026-11-23): Microsoft ships SDK archives for ALL SIX
+# target triplets — linux-x64, linux-musl-x64, osx-arm64, osx-x64
+# (tar.gz) and win-x64, win-arm64 (zip). Microsoft ALSO ships
+# linux-arm64 and linux-musl-arm64 SDKs; those two triplets stay
+# UNPINNED — no leg demands them yet, and a pin no leg consumes is
+# config debt (their increment records them). The skeleton builds
+# x86_64-linux-gnu only; the remaining pins are recorded so their legs
+# are mechanical increments.
+---
+versions:
+  "10.0.404":
+    line: "10"
+    # The Microsoft.NETCore.App shared framework this SDK carries (the
+    # runtime the boot smoke asserts and app payloads roll forward onto);
+    # the SDK version is the pair's identity — two SDK feature bands can
+    # carry the same runtime, never the reverse.
+    runtime_version: "10.0.15"
+    sources:
+      x86_64-linux-gnu:
+        rid: linux-x64
+        url: https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.404/dotnet-sdk-10.0.404-linux-x64.tar.gz
+        sha256: c0610757a818fde4b960d27a0ac421f273068a05dc5ec7abafc01dbf84e9cb4d
+        upstream_sha512: 577d0eb17fec33d029104c5c63a1ab0accc3e28776274abef2218dbac5af18d2109b5406d26b31d76f5c245215e3ba0926a94c20246c672c41847c9e1eb1dc50
+      x86_64-linux-musl:
+        rid: linux-musl-x64
+        url: https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.404/dotnet-sdk-10.0.404-linux-musl-x64.tar.gz
+        sha256: f8f983bc1f784a5e4d3eec83cd70878a590c8328cd25a6d94ac8d43cd50f8c46
+        upstream_sha512: 68ada5fd8fa2b65f55c3db1c2e773dfc9468c9828cbb56fc600151415cc2b116a32804f9aeeb82ca1a3229e3821af7b5b074d5e34487b2807630b5c00f51d801
+      aarch64-macos:
+        rid: osx-arm64
+        url: https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.404/dotnet-sdk-10.0.404-osx-arm64.tar.gz
+        sha256: acf7ebe726a030fa3d2bd03b06196971bd9ef123c579b9345d380bc0ef0d4e44
+        upstream_sha512: 1c9a13f625d0c08f08ef5a53597bababe3d2473527e98db2199210940c69dd5fc599a39a4d7c30ebf297ca2334a81b2f64b9bf05ff99585de9af4a5d85215e96
+      x86_64-macos:
+        rid: osx-x64
+        url: https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.404/dotnet-sdk-10.0.404-osx-x64.tar.gz
+        sha256: 43975ff4e35960556072da9300f4a77bc8dfa2dbe688b8812af32861a47069d5
+        upstream_sha512: 88ca5dac50562b619f852b1b9845f85243f00434be52d2149db18ab4dc05f527f3fca8e1dac82e87b9eeb46a98de1ba4a6d612714caf2222f37b95aeebb611b6
+      x86_64-windows-ucrt:
+        rid: win-x64
+        url: https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.404/dotnet-sdk-10.0.404-win-x64.zip
+        sha256: f94f02eb8451605a893164bbd9c14e7f00ac8914c370c322822e6ac91b106bcc
+        upstream_sha512: 330ddd2665b43cd2e428216a0d8ea1ac7bb19b5434fdc530e62010dc3b52823a620bf95489d628e1ed6f5122401793ee4887cca4a019122361a1231497f632ee
+      aarch64-windows-ucrt:
+        rid: win-arm64
+        url: https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.404/dotnet-sdk-10.0.404-win-arm64.zip
+        sha256: 006bdf067957196a6ffea8640b645aaacbcfeba5ad094d90c8c6900a9dfe9ff4
+        upstream_sha512: 55c041098c709c898d416eaea9a56ab1d17ee884167b2093a5b3d68935a283d15ea796a880b9cf281baccdab56eae1537fae91627f480a68dec081734f535cf5

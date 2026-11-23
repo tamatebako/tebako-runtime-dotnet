@@ -1,0 +1,57 @@
+schema_version: 1
+# Runtime manifest template for dotnet (spec 03 §2.2, kind: runtime;
+# filled from contract.yml + versions.yml by the build — see
+# build/lib/tebako_dotnet_builder/image_builder.rb).
+identity:
+  schema_version: 1
+  kind: runtime
+  name: "dotnet"
+  # The .NET SDK version is the pair's identity (two SDK feature bands
+  # can carry the same shared runtime, never the reverse); the tebako
+  # line rides the artifact stem + the release shard (the openjdk
+  # grammar — the tag IS the tebako product line).
+  version: "@@VERSION@@"
+  producer: {tool: feedstock-build, tool_version: "1"}
+  created: "@@CREATED@@"
+  source: {src_sha256: "@@UPSTREAM_SHA256@@", commit: "@@UPSTREAM_COMMIT@@", builder: "local"}
+  digest:
+    tree_hash: "sha256:0000000000000000000000000000000000000000000000000000000000000000"  # placeholder until the CAS lands (spec 03)
+    blob_sha256: "@@BLOB_SHA256@@"   # zeroed inside the image (spec 03 §7)
+  signing: {state: unsigned}
+  encryption: {state: none}
+  # The payload root IS dotnet's home (the SDK tree's own layout:
+  # dotnet[.exe], host/fxr/, shared/, packs/, sdk/, sdk-manifests/,
+  # templates/). The runtime-neutral `home` annotation (spec 22 §6) is
+  # the exec-cache whole-tree materialization signal (crates/tfs
+  # mount_is_home reads identity.annotations.home): under the declared
+  # visibility: exec-cache the mounted env image materializes into
+  # TEBAKO_EXEC_CACHE and the muxer runs from host-real files — the
+  # dotnet muxer self-locates host/fxr, the SDK bands, and the shared
+  # frameworks from its own exe path, which only a host-real tree
+  # satisfies (the openjdk precedent: a JVM needs no VFS once its home
+  # is materialized).
+  annotations: {home: "/"}
+provides:
+  provides:
+    engine: "@@ENGINE@@"
+    version: "@@VERSION@@"
+    abi_line: "@@ABI_LINE@@"
+    platform: "@@TRIPLET@@"
+    # spec 28 §8's flavor axis — EngineProvides.implementation (tpkg
+    # since spec 30 §1; additive, absent = eligible). Microsoft's
+    # official .NET SDK builds are the only implementation this factory
+    # ships today; the axis exists so a future distribution variant
+    # slots in without a recipe-shape change.
+    implementation: "@@IMPLEMENTATION@@"
+  built_from:
+    src_sha256: "@@UPSTREAM_SHA256@@"
+    patch_set: "none"   # a repack applies no patches; the field is required non-empty
+  # The spawn surface (spec 30 §2): the ONE muxer is the whole surface —
+  # every SDK verb (build, run, test, new, publish) is `dotnet <verb>`;
+  # there are no sibling tool exes to declare (the node/openjdk bin/
+  # inventory class does not exist here). A runtime runs on itself, so
+  # no runtime_requirement.
+  entrypoints:
+@@ENTRYPOINTS_YAML@@
+  env: {}
+  capabilities: {exec: true, read: true, runtime: true}

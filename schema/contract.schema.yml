@@ -1,0 +1,74 @@
+# JSON Schema (draft 2020-12) for contract.yml — the bootstrap <-> runtime
+# contract version, the consumed tamatebako/tebako release pin, the
+# per-platform toolchain digests, and the .NET SDK version catalog.
+# Modeled on tebako-runtime-php's schema/contract.schema.yml, at the
+# repack factory's scope: no container pins and no macOS deployment floor
+# (the legs run runner-native and compile nothing — the wrapper exe, the
+# tfs CLI, and the preload shim arrive as the pinned release's published
+# binaries, so their toolchain provenance is the product repo's, never
+# this repo's).
+$schema: "https://json-schema.org/draft/2020-12/schema"
+title: tebako-runtime-dotnet bootstrap <-> runtime contract
+type: object
+required: [contract_version, link_unit_release, tools, dotnet]
+additionalProperties: false
+properties:
+  contract_version:
+    type: integer
+    # This factory has no contract-1 era: dotnet runtimes are image-era
+    # (the spec-17 driver, spec-29 wrapper pattern) from the first build.
+    minimum: 2
+  link_unit_release:
+    type: string
+    pattern: '^v\d+\.\d+\.\d+$'
+    description: the tamatebako/tebako release whose published wrapper exe, tfs CLI, and link-unit tarball the legs consume
+  tools:
+    type: object
+    required: [repo, sha256]
+    additionalProperties: false
+    properties:
+      repo:
+        type: string
+        pattern: '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+        description: the GitHub repo the toolchain release downloads resolve against
+      sha256:
+        type: object
+        required: [wrapper, tfs]
+        additionalProperties: false
+        properties:
+          wrapper:
+            $ref: '#/$defs/platform_digests'
+          tfs:
+            $ref: '#/$defs/platform_digests'
+          link-unit:
+            $ref: '#/$defs/platform_digests'
+        description: per-tool, per-platform (asset-platform id) digests — the pin layer for every downloaded tebako binary
+  dotnet:
+    type: object
+    required: [catalog, full, tidy]
+    additionalProperties: false
+    properties:
+      catalog:
+        $ref: '#/$defs/versions'
+      full:
+        $ref: '#/$defs/versions'
+      tidy:
+        $ref: '#/$defs/versions'
+$defs:
+  platform_digests:
+    type: object
+    minProperties: 1
+    additionalProperties:
+      type: string
+      pattern: '^[0-9a-f]{64}$'
+    description: asset-platform id (linux-gnu-x86_64, macos-arm64, windows-ucrt64, …) -> sha256
+  versions:
+    type: array
+    items:
+      type: string
+      # The .NET SDK version grammar: <major>.<minor>.<feature band><patch
+      # digits> (10.0.404 = 10.0.4xx band, patch 04). Plain digits/dots —
+      # no prerelease labels in the catalog (a preview SDK would be its
+      # own deliberate increment).
+      pattern: '^\d+\.\d+\.\d{3,}$'
+    uniqueItems: true

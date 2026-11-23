@@ -1,0 +1,90 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Copyright (c) 2026 [Ribose Inc](https://www.ribose.com).
+# All rights reserved.
+# This file is a part of tamatebako
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+# ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+# TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+# PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS
+# BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+# Build one .NET runtime pair (the repack flow — docs/build-chain.md):
+# fetch + verify the pinned SDK archive and the pinned tebako toolchain,
+# stage + prune the env-image tree, image it (tfs mkimage, limnifs),
+# pair it with the spec-29 wrapper exe, sidecars + release shard,
+# read-back gates, extracted-tree truth smoke. The deeper contract
+# scenarios are tools/boot_smoke's.
+#
+# Usage:
+#   tools/build_runtime --dotnet 10.0.404 --triplet x86_64-linux-gnu
+#                       [--work DIR] [--out DIR] [--tar PATH]
+#
+# Exit codes: 0 green · 64 usage · 101 pin/config · 102 fetch/verify ·
+# 103 stage/image/render · 104 extracted smoke.
+
+require "optparse"
+
+REPO_ROOT = File.expand_path("..", __dir__).freeze
+$LOAD_PATH.unshift(File.join(REPO_ROOT, "build", "lib"))
+
+require "tebako_dotnet_builder"
+
+options = { dotnet: nil, triplet: nil, work: nil, out: nil, tar: ENV.fetch("TAR", "tar") }
+OptionParser.new do |opts|
+  opts.banner = "Usage: tools/build_runtime --dotnet VERSION --triplet TRIPLET [options]"
+  opts.on("--dotnet VERSION", "The .NET SDK version from contract.yml's catalog") { |v| options[:dotnet] = v }
+  opts.on("--triplet TRIPLET", "The spec 03 §3 triplet (e.g. x86_64-linux-gnu)") { |v| options[:triplet] = v }
+  opts.on("--work DIR", "Build workspace (default: .build/work-<triplet>)") { |v| options[:work] = v }
+  opts.on("--out DIR", "Artifact dir (default: runtime-packages/)") { |v| options[:out] = v }
+  opts.on("--tar PATH", "Archiver (default: tar; the windows leg points at bsdtar)") { |v| options[:tar] = v }
+  opts.on("-h", "--help") do
+    puts opts
+    exit 0
+  end
+end.parse!
+
+def usage_error(message)
+  warn "build_runtime: #{message}"
+  exit 64
+end
+
+contract = TebakoDotnetBuilder::Contract.new(File.join(REPO_ROOT, "contract.yml"))
+usage_error("--dotnet is required (catalog: #{contract.catalog.join(', ')})") if options[:dotnet].to_s.empty?
+unless contract.catalog.include?(options[:dotnet])
+  usage_error("--dotnet #{options[:dotnet]} is not in contract.yml's catalog (#{contract.catalog.join(', ')})")
+end
+if options[:triplet].to_s.empty? || !TebakoDotnetBuilder::Platform::TRIPLETS.include?(options[:triplet])
+  usage_error("--triplet must be one of: #{TebakoDotnetBuilder::Platform::TRIPLETS.join(', ')}")
+end
+
+begin
+  TebakoDotnetBuilder::Builder.new(
+    repo_root: REPO_ROOT,
+    version: options[:dotnet],
+    triplet: options[:triplet],
+    work_dir: options[:work],
+    out_dir: options[:out],
+    tar: options[:tar]
+  ).build
+rescue TebakoDotnetBuilder::Error => e
+  warn "::error::#{e.message}"
+  exit e.exit_code
+end
