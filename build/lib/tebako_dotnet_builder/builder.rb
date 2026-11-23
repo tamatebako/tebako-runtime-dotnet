@@ -149,12 +149,25 @@ module TebakoDotnetBuilder
       File.join(@repo_root, ".build", "downloads")
     end
 
-    # The run-wide build timestamp (ruby#381's idiom): the workflow
-    # exports the HEAD commit's epoch; unset falls to epoch 0 so a local
-    # build is deterministic too.
+    # The run-wide build timestamp (ruby#381's idiom, the php factory's
+    # shape): the workflow exports the HEAD commit's epoch so two runs of
+    # the same tree stamp the image manifest identically; unset falls to
+    # epoch 0 (the tfs-cli mkimage convention) so a local build is
+    # deterministic too. A malformed value is a named error, never a
+    # silent wall-clock fallback.
     def created_timestamp
-      epoch = ENV.fetch("SOURCE_DATE_EPOCH", "0").to_i
-      Time.at(epoch).utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+      Time.at(sde_epoch).utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end
+
+    def sde_epoch
+      sde = ENV.fetch("SOURCE_DATE_EPOCH", nil)
+      return 0 if sde.nil? || sde.empty?
+
+      Integer(sde, 10)
+    rescue ArgumentError
+      raise TebakoDotnetBuilder::Error.new(
+        "SOURCE_DATE_EPOCH is malformed (#{sde.inspect} — whole seconds since the epoch)", 64
+      )
     end
 
     def step(message)

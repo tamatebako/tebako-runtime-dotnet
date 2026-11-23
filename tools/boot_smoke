@@ -51,6 +51,29 @@
 #   dll                  the compile fixture's built dll executed
 #                        directly (`dotnet <dll>`) — the app-payload
 #                        execution shape
+#   compute-floor        the boot probes are blind to a slow BUILD
+#                        (tebako-runtime-python#79's lesson, the php
+#                        factory's shape): a fixed pure-compute C# probe
+#                        (recursive fib(35), no I/O in the loop) compiled
+#                        + executed inside the pair, timed with
+#                        Stopwatch INSIDE the process (best of three —
+#                        boot/mount cost and one-off scheduling noise
+#                        never enter the measurement), against a
+#                        per-platform ceiling that is a regression
+#                        tripwire, never a benchmark. The probe ALSO
+#                        reports RuntimeInformation.ProcessArchitecture:
+#                        the repack's slow-compute class is a transplanted
+#                        pair running under emulation (an x64 muxer on an
+#                        arm64 leg), so the process architecture must be
+#                        the leg's OWN. Modes (COMPUTE_FLOOR_MODE):
+#                        "fail" (the default) trips the leg; "warn" —
+#                        armed by the workflow on the macos-x86_64 leg
+#                        ALONE, where the link-unit line carries the LIVE
+#                        ~3x slow-compute defect on real Intel silicon
+#                        (tebako#1095, still open) — prints a ::warning::
+#                        and keeps the leg green. REMOVAL CONDITION: that
+#                        leg reverts to fail-closed when tebako#1095
+#                        closes.                                         [all]
 #   bad-mount            --tebako-image <missing>:-:/nope -> exit 69
 #                        (the unavailable image, named on stderr)
 #   mount-root-malformed TEBAKO_MOUNT_ROOT=relative/path -> exit 65
@@ -58,16 +81,26 @@
 #                        image -> exit 78 (the image grants no override
 #                        — the closed default, spec 00 §9)
 #
+# The windows legs run the SAME scenario set — the PE/ucrt materialize
+# path IS the boot under test (exec-cache materializes the image's tree
+# host-real; the muxer + hostfxr + coreclr load from it). Every windows
+# boot's PATH is scrubbed to the Windows system directories (System32 +
+# the Windows root + Wbem) — no mingw/msys toolchain directory, the
+# audience-rule condition (the python factory's grammar); and the CLI's
+# HOME/NuGet/exec-cache roots ride the smoke's scratch via
+# USERPROFILE/TMP/TEMP (native windows processes ignore HOME/TMPDIR).
+#
 # Usage:
 #   tools/boot_smoke [--runtime-root DIR | --exe PATH]
-#                    [--scenario all|bare|boot|compile|dll|bad-mount|
-#                               mount-root-malformed|override-ungranted]
+#                    [--scenario all|bare|boot|compile|dll|compute-floor|
+#                               bad-mount|mount-root-malformed|override-ungranted]
 #
 # Exit codes: 0 green · 141 usage/resolution · 143 a scenario failed.
 
 require "fileutils"
 require "open3"
 require "optparse"
+require "rbconfig"
 require "tmpdir"
 require "yaml"
 
@@ -83,6 +116,23 @@ require "tebako_dotnet_builder"
 BOOT_TIMEOUT = 900
 ERROR_TIMEOUT = 60
 
+# The compute-floor scenario (the header's tebako-runtime-python#79
+# block): fib(COMPUTE_FIB_N) inner-timed, best of COMPUTE_FIB_RUNS. The
+# ceiling is per-platform (a healthy JIT leg measures ~0.5-1 s; the
+# recorded values carry several-x headroom — a tripwire, never a
+# benchmark bound) and keyed by the pair's asset platform; a platform
+# with no recorded ceiling is a named error, never a silent default.
+COMPUTE_FIB_N = 35
+COMPUTE_FIB_RUNS = 3
+COMPUTE_FLOOR_SECONDS = {
+  "linux-gnu-x86_64" => 4.0,
+  "linux-musl-x86_64" => 4.0,
+  "macos-arm64" => 4.0,
+  "macos-x86_64" => 4.0,
+  "windows-ucrt64" => 4.0,
+  "windows-ucrt-arm64" => 4.0
+}.freeze
+
 IMAGE_SUFFIXES = %w[.tfs .dwarfs].freeze
 MARKER_SUFFIXES = %w[.sha256 .json .yaml .asc].freeze
 NON_EXECUTABLE_SUFFIXES = (IMAGE_SUFFIXES + MARKER_SUFFIXES).freeze
@@ -92,9 +142,28 @@ NON_EXECUTABLE_SUFFIXES = (IMAGE_SUFFIXES + MARKER_SUFFIXES).freeze
 # GEM_HOME lesson).
 ENV_SCRUBBED = %w[LD_PRELOAD DYLD_INSERT_LIBRARIES DYLD_FALLBACK_LIBRARY_PATH].freeze
 
+# The host platform probe (the windows adjustments below): msys/mingw
+# rubies report msys/mingw host_os — the runner's hosted ruby on every
+# windows leg included.
+WINDOWS_HOST = !!(RbConfig::CONFIG["host_os"] =~ /mswin|msys|mingw|cygwin/i)
+
 def usage_error(message)
   warn "boot_smoke: #{message}"
   exit 141
+end
+
+# The compute-floor scenario's mode (its header block): "fail" — the
+# default, and every leg's shape but one — trips the leg on a breached
+# floor; "warn" prints the measurement + a workflow-command ::warning::
+# and keeps the leg green. The workflow arms "warn" on the macos-x86_64
+# leg ALONE: the live tebako#1095 slow-compute defect (the product
+# repo's, in the link-unit line this factory pins) would otherwise red
+# that leg until the fix ships. REMOVAL CONDITION: the leg reverts to
+# fail-closed when tebako#1095 closes. Any other value is a named error,
+# never a silent fallback.
+COMPUTE_FLOOR_MODE = ENV.fetch("COMPUTE_FLOOR_MODE", "fail")
+unless %w[fail warn].include?(COMPUTE_FLOOR_MODE)
+  usage_error("COMPUTE_FLOOR_MODE=#{COMPUTE_FLOOR_MODE.inspect} — known: fail (the default), warn")
 end
 
 options = { runtime_root: ENV.fetch("TEBAKO_RUNTIME_ROOT", nil), exe: nil, scenario: "all" }
@@ -133,8 +202,14 @@ at_exit { FileUtils.rm_rf(SCRATCH) }
 def boot(executable, argv, env_extra, timeout: BOOT_TIMEOUT)
   Dir.mktmpdir("tebako-dotnet-boot-cwd") do |cwd|
     env = ENV_SCRUBBED.to_h { |key| [key, nil] }
-    ENV.each_key { |key| env[key] = nil if key.start_with?("TEBAKO_") }
+    ENV.each_key { |key| env[key] = nil if key.start_with?("TEBAKO_", "DOTNET_") }
     env.merge!(dotnet_cli_env.merge(env_extra))
+    # The windows legs' hostile PATH (the python factory's grammar): EVERY
+    # booted runtime sees only the Windows system directories — the
+    # audience-rule condition (a bare windows machine carries no mingw/msys
+    # toolchain directory). The exec-cache materialized tree is host-real,
+    # so the muxer's own DLL closure binds from there.
+    env["PATH"] = windows_system_path if WINDOWS_HOST
     # popen3 + a wait-deadline poll, NOT Timeout.timeout around capture3:
     # the Timeout unwind lands in popen3's ensure (wait_thr.join on the
     # still-immortal child) and blocks forever there (the tebako#527 gnu
@@ -161,14 +236,24 @@ def boot(executable, argv, env_extra, timeout: BOOT_TIMEOUT)
   end
 end
 
+# The PATH a windows boot gets on this leg: the Windows system directories
+# only (System32, the Windows root, Wbem) — never a mingw/msys toolchain
+# directory (the python grammar, issue-55's shape).
+def windows_system_path
+  root = ENV.fetch("SystemRoot", ENV.fetch("SYSTEMROOT", "C:\\Windows"))
+  "#{root}\\System32;#{root};#{root}\\System32\\Wbem"
+end
+
 # The hermetic dotnet CLI env (every scenario): no telemetry, no logo,
 # no first-run side effects; the CLI's HOME/NuGet caches and the
-# driver-named exec cache live under the smoke's scratch tree.
+# driver-named exec cache live under the smoke's scratch tree. On
+# windows the native consumers read USERPROFILE/TMP/TEMP (HOME/TMPDIR
+# are msys-only there), so the same roots ride the native spellings.
 def dotnet_cli_env
   home = File.join(SCRATCH, "home")
   nuget = File.join(SCRATCH, "nuget")
   FileUtils.mkdir_p([home, nuget])
-  {
+  env = {
     "HOME" => home,
     "NUGET_PACKAGES" => nuget,
     "TMPDIR" => SCRATCH,
@@ -176,6 +261,8 @@ def dotnet_cli_env
     "DOTNET_NOLOGO" => "1",
     "DOTNET_SKIP_FIRST_TIME_EXPERIENCE" => "1"
   }
+  env.merge!("USERPROFILE" => home, "TMP" => SCRATCH, "TEMP" => SCRATCH) if WINDOWS_HOST
+  env
 end
 
 $failures = 0
@@ -219,7 +306,47 @@ def compile_fixture(dir, line)
   CS
 end
 
-KNOWN_SCENARIOS = %w[bare boot compile dll bad-mount mount-root-malformed override-ungranted].freeze
+# The compute-floor probe (the scenario's header block): fib(35) — the
+# covenant's steady.cpu shape, no I/O in the loop — timed INSIDE the
+# process (Stopwatch around each run): the boot/mount cost and the
+# harness never enter the measurement, and best-of-N drops one-off
+# scheduling noise. The accumulator keeps the recursion live against
+# dead-code elimination; the architecture line is the emulation tripwire
+# (a transplanted pair reports the FOREIGN process architecture).
+def compute_fixture(dir, line)
+  File.write(File.join(dir, "compute.csproj"), <<~XML)
+    <Project Sdk="Microsoft.NET.Sdk">
+      <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net#{line}.0</TargetFramework>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+      </PropertyGroup>
+    </Project>
+  XML
+  File.write(File.join(dir, "Program.cs"), <<~CS)
+    using System.Diagnostics;
+    using System.Runtime.InteropServices;
+
+    static long Fib(int n) => n < 2 ? n : Fib(n - 1) + Fib(n - 2);
+
+    long acc = 0;
+    var runs = new List<double>();
+    for (var i = 0; i < #{COMPUTE_FIB_RUNS}; i++)
+    {
+        var t0 = Stopwatch.GetTimestamp();
+        acc += Fib(#{COMPUTE_FIB_N});
+        runs.Add(Stopwatch.GetElapsedTime(t0).TotalSeconds);
+    }
+    Console.WriteLine("COMPUTE-FLOOR");
+    Console.WriteLine($"arch: {RuntimeInformation.ProcessArchitecture}/{RuntimeInformation.OSArchitecture}");
+    Console.WriteLine("runs: " + string.Join(" ", runs.Select(r => r.ToString("F3"))));
+    Console.WriteLine($"best: {runs.Min():F3}");
+    Console.WriteLine($"acc: {acc}");
+  CS
+end
+
+KNOWN_SCENARIOS = %w[bare boot compile dll compute-floor bad-mount mount-root-malformed override-ungranted].freeze
 
 def selected_scenarios(only)
   return KNOWN_SCENARIOS.dup if only == "all"
@@ -228,7 +355,7 @@ def selected_scenarios(only)
   usage_error("unknown scenario '#{only}' (known: #{KNOWN_SCENARIOS.join(", ")})")
 end
 
-def run_scenarios(executable, image, version, runtime_version, rid, line, selected)
+def run_scenarios(executable, image, version, runtime_version, rid, line, asset_platform, selected)
   selected.each do |scenario|
     case scenario
     when "bare"
@@ -276,6 +403,55 @@ def run_scenarios(executable, image, version, runtime_version, rid, line, select
                           ["--tebako-entry", "dotnet", File.join(out_dir, "hello.dll")],
                           { "TEBAKO_RUNTIME_IMAGE" => image })
       expect_ok("dll: dotnet <dll> executes the built fixture", out, err, st, "TEBAKO-DOTNET-OK")
+    when "compute-floor"
+      fixture = File.join(SCRATCH, "compute-fixture")
+      FileUtils.mkdir_p(fixture)
+      compute_fixture(fixture, line)
+      out_dir = File.join(SCRATCH, "compute-out")
+      out, err, st = boot(executable,
+                          ["--tebako-entry", "dotnet", "build", fixture, "-c", "Release", "-o", out_dir],
+                          { "TEBAKO_RUNTIME_IMAGE" => image })
+      dll = File.join(out_dir, "compute.dll")
+      check("compute-floor: dotnet build produced the probe dll", st&.exitstatus&.zero? && File.file?(dll),
+            "exit #{st&.exitstatus.inspect}\nstdout: #{out}\nstderr: #{err}")
+      next unless File.file?(dll)
+
+      out, err, st = boot(executable, ["--tebako-entry", "dotnet", dll],
+                          { "TEBAKO_RUNTIME_IMAGE" => image })
+      expect_ok("compute-floor", out, err, st, "COMPUTE-FLOOR")
+      out = out.delete("\r")
+      # The repack's slow-compute class (the scenario's header block): a
+      # pair transplanted under emulation reports the FOREIGN process
+      # architecture — the leg's own must answer.
+      expected_arch = asset_platform.include?("arm64") ? "Arm64" : "X64"
+      check("compute-floor: the process architecture is the leg's own (no emulation tax)",
+            out.include?("arch: #{expected_arch}/"),
+            "expected arch: #{expected_arch}/…\nstdout: #{out}\nstderr: #{err}")
+      puts "     compute-floor: fib(#{COMPUTE_FIB_N}) #{out[/^runs: (.+)$/, 1]}"
+      best = out[/^best: (\d+(?:\.\d+)?)$/, 1]&.to_f
+      ceiling = COMPUTE_FLOOR_SECONDS.fetch(asset_platform) do
+        usage_error("no compute-floor ceiling recorded for #{asset_platform} — record this leg's ceiling in tools/boot_smoke")
+      end
+      floor = "compute-floor: fib(#{COMPUTE_FIB_N}) best-of-#{COMPUTE_FIB_RUNS} under #{ceiling}s"
+      detail = "measured best #{best.inspect}s (runs in the log above) — a leg computing at a fraction " \
+               "of the matrix's rate is a slow BUILD, never a publishable artifact " \
+               "(tebako-runtime-python#79's lesson)\nstdout: #{out}\nstderr: #{err}"
+      if best.nil? || best > ceiling
+        if COMPUTE_FLOOR_MODE == "warn"
+          # The warn tier (the header block + the mode comment): the
+          # defect is LIVE on this leg's class, the root cause is the
+          # product repo's — the measurement and a workflow-command
+          # warning carry it, the leg stays green.
+          puts "::warning title=compute-floor::fib(#{COMPUTE_FIB_N}) best #{best.inspect}s past the " \
+               "#{ceiling}s tripwire — the live tebako#1095 slow-compute defect on real " \
+               "Intel silicon; this leg rides warn-only until tebako#1095 closes"
+          puts "warn #{floor}: #{detail}"
+        else
+          check(floor, false, detail)
+        end
+      else
+        check(floor, true, detail)
+      end
     when "bad-mount"
       missing = File.join(SCRATCH, "no-such-image.tfs")
       out, err, st = boot(executable,
@@ -322,7 +498,7 @@ line = pins.line(version)
 runtime_version = pins.runtime_version(version)
 
 puts "-- Boot smoke: #{executable} (#{asset_platform}, SDK #{version}, runtime #{runtime_version})"
-run_scenarios(executable, image, version, runtime_version, rid, line, selected_scenarios(options[:scenario]))
+run_scenarios(executable, image, version, runtime_version, rid, line, asset_platform, selected_scenarios(options[:scenario]))
 
 if $failures.positive?
   puts "#{$failures} scenario check(s) failed"

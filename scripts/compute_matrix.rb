@@ -54,9 +54,16 @@
 #   asset_platform            — the pair stem's platform segment
 #                               (tebako-runtime-<line>-dotnet-<sdk>-<id>)
 #   exe_suffix                — ".exe" on windows, "" elsewhere
-#   container                 — null: the legs run runner-native (a
-#                               repack compiles nothing — no toolchain
-#                               container exists here)
+#   container                 — the tpkg-builder image the leg's build +
+#                               smokes run inside (the musl leg: its musl
+#                               binaries execute only under musl libc —
+#                               the php/openjdk container-leg idiom);
+#                               null on the runner-native legs
+#   tar                       — the row's archiver: "tar" POSIX; the ucrt64
+#                               bsdtar on windows x64 (GNU tar cannot read
+#                               the .zip SDK archive), the in-box
+#                               System32 tar.exe on windows arm64 (the
+#                               openjdk idiom)
 #
 # Named errors, exit 64: an unknown platform/arch filter, an unknown
 # --format, or a matrix.json row outside the known vocabulary is a config
@@ -142,7 +149,8 @@ env.each do |row|
       triplet: triplet,
       asset_platform: asset_platform,
       exe_suffix: TebakoDotnetBuilder::Platform.exe_suffix_for(triplet),
-      container: nil
+      container: row["container"],
+      tar: row.fetch("tar", "tar")
     }
   end
   # The env row joins the expectations only when the row EMITTED a leg

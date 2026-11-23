@@ -35,7 +35,8 @@
 #   scripts/versions                     # the catalog, as a JSON array
 #   scripts/versions --filter SPEC       # full | tidy | catalog | "10.0.404,10.0.500"
 #   scripts/versions --pin KEY           # a top-level pin's raw value
-#                                        # (link_unit_release | contract_version)
+#                                        # (link_unit_release | contract_version |
+#                                        #  container_version)
 #
 # Named errors, exit 64 — an unknown set keyword or version is a usage
 # error, never a silently empty set.
@@ -84,7 +85,7 @@ end
 def pin(key)
   unless contract.key?(key)
     usage_error "#{CONTRACT_YML} carries no #{key} pin " \
-                "(known: link_unit_release, contract_version)"
+                "(known: link_unit_release, contract_version, container_version)"
   end
   contract[key]
 end

@@ -1,16 +1,16 @@
 # JSON Schema (draft 2020-12) for contract.yml — the bootstrap <-> runtime
 # contract version, the consumed tamatebako/tebako release pin, the
-# per-platform toolchain digests, and the .NET SDK version catalog.
-# Modeled on tebako-runtime-php's schema/contract.schema.yml, at the
-# repack factory's scope: no container pins and no macOS deployment floor
-# (the legs run runner-native and compile nothing — the wrapper exe, the
-# tfs CLI, and the preload shim arrive as the pinned release's published
-# binaries, so their toolchain provenance is the product repo's, never
-# this repo's).
+# per-platform toolchain digests, the tpkg-builder container line (tag +
+# immutable digest) the musl leg builds inside, and the .NET SDK version
+# catalog. Modeled on tebako-runtime-php's schema/contract.schema.yml, at
+# the repack factory's scope: no macOS deployment floor (the legs compile
+# nothing — the wrapper exe, the tfs CLI, and the preload shim arrive as
+# the pinned release's published binaries, so their toolchain provenance
+# is the product repo's, never this repo's).
 $schema: "https://json-schema.org/draft/2020-12/schema"
 title: tebako-runtime-dotnet bootstrap <-> runtime contract
 type: object
-required: [contract_version, link_unit_release, tools, dotnet]
+required: [contract_version, link_unit_release, tools, container_version, container_digests, dotnet]
 additionalProperties: false
 properties:
   contract_version:
@@ -22,6 +22,23 @@ properties:
     type: string
     pattern: '^v\d+\.\d+\.\d+$'
     description: the tamatebako/tebako release whose published wrapper exe, tfs CLI, and link-unit tarball the legs consume
+  container_version:
+    type: string
+    pattern: '^v\d+'
+    # The moving family tag line (v1 today; a dated immutable tag would be
+    # vYYYY.MM.DD). The immutable side per (container x arch) is
+    # container_digests.
+    description: the tpkg-builder container tag line the musl leg runs inside
+  container_digests:
+    type: object
+    minProperties: 1
+    additionalProperties:
+      type: object
+      minProperties: 1
+      additionalProperties:
+        type: string
+        pattern: '^sha256:[0-9a-f]{64}$'
+    description: the ghcr manifest digest per (container x docker-arch) — the pin's immutable half (ruby#381's idiom)
   tools:
     type: object
     required: [repo, sha256]

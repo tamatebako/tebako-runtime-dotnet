@@ -24,18 +24,23 @@ workspace root) — read it first. The short version as applied here:
 - **YAML** for all authored config/manifests; named errors and named
   exit codes, never silent fallbacks.
 
-## Repo status: pre-release skeleton
+## Repo status: pre-release
 
-One leg (linux-gnu x86_64) green: `tools/build_runtime` (the repack
-flow — fetch/verify → stage/prune → image → pair → sidecars →
-read-back → extracted smoke) + `tools/boot_smoke` (the contract
-scenarios), wired into `build-linux-gnu.yml` (a thin trigger over
-`_build-platform.yml`: parity → compute → build → verify) plus the
-static gate (`lint.yml`). **No release has been cut** — the first
-release is the owner's explicit act (README's follow-ups name the
-remaining increments: the other triplets, publish+sign+registry, the
-monitor, the preload re-evaluation, the web workload, the payload
-lane).
+Six legs (linux-gnu x86_64, linux-musl x86_64, macOS arm64 + x86_64,
+windows ucrt x64 + arm64): `tools/build_runtime` (the repack flow —
+fetch/verify → stage/prune → image → pair → sidecars → read-back →
+extracted smoke) + `tools/boot_smoke` (the contract scenarios + the
+compute-floor), wired into four thin triggers
+(`build-linux-gnu.yml`, `build-linux-musl.yml`, `build-macos.yml`,
+`build-windows.yml`) over `_build-platform.yml` (parity → compute →
+preflight → build → verify) plus the static gate (`lint.yml`). The
+musl leg builds inside the digest-pinned tpkg-builder container (the
+preflight proves recorded == live); the macos/windows legs are
+runner-native (msys2 ucrt64 bsdtar on windows x64, the in-box
+System32 tar.exe on windows arm64). **No release has been cut** — the
+first release is the owner's explicit act (README's follow-ups name the
+remaining increments: publish+sign+registry next, then the monitor,
+the preload re-evaluation, the web workload, the payload lane).
 
 ## Repo-local gotchas
 
@@ -50,13 +55,29 @@ lane).
   compiled-in `TEBAKO_CONTRACT_VERSION`) and the matrix-leg coverage
   arm (every `.github/matrix.json` triplet pinned in `versions.yml`).
   A contract bump edits both in the same commit.
+- CI containers are `ghcr.io/tamatebako/tpkg-builder-*`
+  (tebako-ci-containers) only, pulled `name:tag@digest` (the digest
+  lives in `contract.yml container_digests`; the preflight job proves
+  it live). The archived v1 `tebako-<platform>` images are never
+  referenced here.
+- The container legs bind-mount the workspace and run as root —
+  root-owned files land in `.build/` and `runtime-packages/`. The
+  workflow hands them back to the runner user (`chown` at the end of
+  the docker-run step); do the same locally before editing or
+  `git clean`-ing.
 - Local container builds need docker with the linux/amd64 platform
-  (`docker run --platform linux/amd64` on arm64 hosts). The leg needs
-  `ruby curl tar libicu74 libssl3` inside the container (the .NET
-  muxer's own deps).
+  (`docker run --platform linux/amd64` on arm64 hosts). The gnu leg's
+  ubuntu container needs `ruby curl tar libicu74 libssl3` (the .NET
+  muxer's own deps); the musl tpkg-builder container needs `apk add
+  icu` in-leg (alpine carries no libicu — the .NET runtime's one
+  non-baked host dep).
 - The exec-cache first boot materializes the pruned SDK tree (~0.5 GB)
   once per TMPDIR — keep TMPDIR stable across local smoke runs (the
   boot smoke does).
+- The windows smoke's PATH is scrubbed to the Windows system
+  directories per boot (the audience-rule condition); a debugging boot
+  on a windows dev box belongs behind the maintainer's own env, never
+  in the smoke.
 - `gh pr create` bodies: always `--body-file` — inline `--body` with
   backticks executes them (ecosystem §13).
 - Architecture/chain questions: `docs/build-chain.md` first, then
