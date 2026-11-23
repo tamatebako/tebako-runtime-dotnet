@@ -1,0 +1,299 @@
+# Copyright (c) 2026 [Ribose Inc](https://www.ribose.com).
+# All rights reserved.
+# This file is a part of tamatebako
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+# ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+# TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+# PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS
+# BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+# The ONE per-platform build workflow (tebako-runtime-php's
+# _build-platform.yml port, at this factory's repack scope — no
+# containers, no compile-time signing arms, no publish stage: the legs
+# run runner-native and build nothing but the repack). Called by the
+# thin platform triggers (build-<platform>.yml) — never dispatched
+# directly.
+#
+# Stage 0 (parity): the contract gate's driver-source parity arm needs the
+#   pinned product release's lib.rs — a raw.githubusercontent.com fetch
+#   that flakes under near-simultaneous per-platform reads
+#   (tamatebako/tebako-runtime-python#4). ONE dedicated job fetches it
+#   (bounded retry inside Fetcher.read_url) and hands it to the compute
+#   job as an artifact, so a flaky fetch fails this one retried job
+#   instead of a platform's whole compute leg.
+# Stage 1 (compute): the contract gate (schema + pins + the parity arm,
+#   reading the stage-0 artifact via TEBAKO_DRIVER_SRC — fail-closed
+#   exactly as before) runs, then scripts/compute_matrix.rb expands THIS
+#   platform's legs under the dispatch filters. Every downstream value
+#   flows from these outputs — workflow YAML never hardcodes a version, a
+#   tag, or a SHA (ecosystem SSOT invariant). The run's SOURCE_DATE_EPOCH
+#   (the HEAD commit's epoch, ruby#381's idiom) is computed here too, so
+#   every leg stamps the SAME build timestamp into the image manifest.
+# Stage 2 (build): one leg per (.NET SDK x arch) of this platform:
+#   tools/build_runtime (fetch + verify -> stage + prune -> image -> pair
+#   -> sidecars -> read-back -> extracted smoke) -> tools/boot_smoke (the
+#   contract scenarios) -> the runtime-packages-<os>-<arch>-<dotnet>
+#   artifact. The build tooling fetches and sha256-verifies every input
+#   itself (the pinned SDK archive off versions.yml, the pinned wrapper /
+#   tfs CLI / link unit off contract.yml) — there is NO source-build path
+#   for the driver stack here (contract.yml's link_unit_release comment).
+#
+# The cache holds ONLY the sha256-verified downloads (.build/downloads):
+# a restored entry re-verifies against the pins on use, so a poisoned or
+# stale cache cannot survive a pin bump (the key also carries the pins'
+# hashes). save-always: a red boot smoke must never tax the next leg a
+# cold re-download (the ruby factory's msys campaign lesson). CACHE_VER
+# stays the manual escape hatch.
+name: _build-platform
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        description: 'This call''s platform: linux-gnu | linux-musl | macos | windows'
+        required: true
+        type: string
+      dotnet_filter:
+        description: 'SDKs: "full", "tidy", "catalog", or comma-separated versions'
+        type: string
+        default: 'full'
+      arch_filter:
+        description: 'Arch slice: "all" or an arch (x86_64 | arm64)'
+        type: string
+        default: 'all'
+    outputs:
+      run:
+        description: '"true" when this platform has legs under the filters'
+        value: ${{ jobs.compute.outputs.run }}
+      tebako_version:
+        description: 'The tebako product line the pairs build against (contract.yml link_unit_release)'
+        value: ${{ jobs.compute.outputs.tebako_version }}
+      env_matrix:
+        description: 'The selected matrix.json rows (+ triplet/asset_platform) as JSON'
+        value: ${{ jobs.compute.outputs.env_matrix }}
+      dotnet_matrix:
+        description: 'The selected .NET SDK versions as JSON'
+        value: ${{ jobs.compute.outputs.dotnet_matrix }}
+
+env:
+  CACHE_VER: 1
+
+jobs:
+  # The parity artifact, fetched ONCE per call: the driver-source parity
+  # arm's second representation (the pinned release's lib.rs) off
+  # raw.githubusercontent.com — a transient-failure surface that used to
+  # ride inside every platform's compute step, where one flake red-ed the
+  # whole platform and the ::error:: never reached the log
+  # (tamatebako/tebako-runtime-python#4). The fetch retries with backoff
+  # (Fetcher.read_url) and names every failed attempt on stderr; the
+  # compute job below consumes the artifact, never the network.
+  parity:
+    name: Fetch the driver parity source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+
+      - name: Fetch the pinned driver's parity source
+        run: bundle exec scripts/check_contract.rb --fetch-parity .build/parity/lib.rs
+
+      - name: Upload the parity source
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: driver-parity-src-${{ inputs.platform }}
+          path: .build/parity/lib.rs
+          retention-days: 1
+
+  compute:
+    name: Compute the ${{ inputs.platform }} legs
+    needs: parity
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.emit.outputs.run }}
+      leg_count: ${{ steps.emit.outputs.leg_count }}
+      legs: ${{ steps.emit.outputs.legs }}
+      tebako_version: ${{ steps.emit.outputs.tebako_version }}
+      env_matrix: ${{ steps.emit.outputs.env_matrix }}
+      dotnet_matrix: ${{ steps.emit.outputs.dotnet_matrix }}
+      source_date_epoch: ${{ steps.get-sde.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The source-date epoch below reads the HEAD commit's own time
+          # (git log -1 --format=%ct) — full history, never the depth-1
+          # default (ruby#381's idiom).
+          fetch-depth: 0
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+
+      # The parity artifact the stage-0 job fetched — the gate's parity
+      # arm reads THIS file (TEBAKO_DRIVER_SRC), never the network.
+      - name: Download the parity source
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: driver-parity-src-${{ inputs.platform }}
+          path: .build/parity
+
+      # The contract gate first: contract.yml against its schema, the
+      # catalog resolvable AND cross-locked to versions.yml's source pins,
+      # every matrix leg's triplet pinned, AND the driver-source parity
+      # arm (the pinned release's TEBAKO_CONTRACT_VERSION vs
+      # contract_version) — fail-closed, against the fetched artifact.
+      - name: validate the contract
+        env:
+          TEBAKO_DRIVER_SRC: .build/parity/lib.rs
+        run: bundle exec scripts/check_contract.rb
+
+      - id: emit
+        env:
+          DOTNET_FILTER: ${{ inputs.dotnet_filter }}
+          PLATFORM_FILTER: ${{ inputs.platform }}
+          ARCH_FILTER: ${{ inputs.arch_filter }}
+        run: |
+          set -euo pipefail
+          legs=$(scripts/compute_matrix.rb)
+          count=$(jq '.include | length' <<< "$legs")
+          {
+            echo "legs=$legs"
+            echo "leg_count=$count"
+            if [ "$count" -gt 0 ]; then echo "run=true"; else echo "run=false"; fi
+            echo "tebako_version=$(scripts/versions --pin link_unit_release)"
+            echo "env_matrix=$(scripts/compute_matrix.rb --format env)"
+            echo "dotnet_matrix=$(scripts/compute_matrix.rb --format dotnets)"
+          } >> "$GITHUB_OUTPUT"
+          # Mirror the plan to the LOG: values written only to
+          # $GITHUB_OUTPUT leave no diagnosable record when the legs skip.
+          echo "plan (${{ inputs.platform }}): $count legs (sdk=${DOTNET_FILTER} arch=${ARCH_FILTER})"
+          jq -r '.include[] | "  \(.dotnet) \(.os)/\(.arch) [\(.triplet)] on \(.host)"' <<< "$legs"
+
+      # The run's build timestamp: ONE value for the whole run — the HEAD
+      # commit time — so every leg stamps the SAME SOURCE_DATE_EPOCH into
+      # the image manifest's identity.created (the builder honors it;
+      # unset falls to epoch 0). The full-history checkout above makes %ct
+      # the commit's own time, never the run's wall clock — a same-commit
+      # re-run reproduces it (ruby#381's idiom).
+      - name: Get the source-date epoch
+        id: get-sde
+        run: |
+          sde=$(git log -1 --format=%ct)
+          echo "SOURCE_DATE_EPOCH for this run: $sde"
+          echo "epoch=$sde" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.dotnet }} / ${{ matrix.os }}-${{ matrix.arch }}
+    needs: compute
+    # An unguarded empty matrix poisons the run conclusion. No always()
+    # here: a FAILED compute must skip the legs outright — the verify job
+    # reports it by name.
+    if: ${{ needs.compute.outputs.run == 'true' }}
+    runs-on: ${{ matrix.host }}
+    # A hung leg fails loudly at the cap, never silently (the exec-cache
+    # first materialization + the Roslyn compile fixture are the slow
+    # scenarios; the cap carries headroom over both).
+    timeout-minutes: 60
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SOURCE_DATE_EPOCH: ${{ needs.compute.outputs.source_date_epoch }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.compute.outputs.legs) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Create folder for runtime packages
+        run: mkdir -p runtime-packages
+
+      - name: Cache the verified downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .build/downloads
+          key: tebako-dotnet-dl-${{ matrix.os }}-${{ matrix.arch }}-${{ hashFiles('contract.yml', 'versions.yml') }}-v${{ env.CACHE_VER }}
+          save-always: true
+
+      # --- build (runner-native: a repack compiles nothing — the SDK
+      # archive unpacks, prunes, images; the wrapper exe and the tfs CLI
+      # arrive as the pinned release's published binaries) ---------------
+      - name: Build the runtime pair
+        run: tools/build_runtime --dotnet "${{ matrix.dotnet }}" --triplet "${{ matrix.triplet }}"
+
+      # --- the gates (a red gate fails the leg; the artifact below still
+      # ships for diagnostics, but without the leg-complete marker) -------
+      # The boot smoke resolves the exe from TEBAKO_RUNTIME_ROOT.
+      - name: Boot smoke
+        env:
+          TEBAKO_RUNTIME_ROOT: runtime-packages
+        run: tools/boot_smoke
+
+      # The leg-complete marker (tebako-runtime-ruby#190): written only
+      # when every gate above passed — a failed step stops the job before
+      # this point (default step gating). The diagnostics upload below is
+      # always(), so a red leg's partial packages DO ship as an artifact;
+      # the marker is what distinguishes them from a complete leg.
+      - name: Mark the leg complete
+        run: touch runtime-packages/.leg-complete
+
+      # The leg's runtime packages, kept for a week as build evidence AND
+      # diagnostics: one artifact per (platform, arch, sdk) leg, immutable
+      # across the run's attempts. Uploads even when the build or boot
+      # smoke failed (always()) — a red leg's packages are exactly the
+      # ones worth diagnosing.
+      - name: Upload the runtime packages
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runtime-packages-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.dotnet }}
+          # include-hidden-files: the .leg-complete marker is dot-hidden
+          # (upload-artifact excludes dotfiles by default since v4.4).
+          include-hidden-files: true
+          path: runtime-packages
+          retention-days: 7
+
+  # The terminal aggregate — and the branch-protection gate. The build
+  # legs are a dynamic matrix whose check names shift with the catalog
+  # (a version bump renames every leg), so protection pins this job's
+  # stable per-platform check name ("<platform> / all legs green")
+  # instead of any leg's. Green means: the contract/matrix computed and
+  # every emitted leg succeeded; a platform whose filter emits no legs
+  # gates on compute alone.
+  verify:
+    name: all legs green
+    needs: [parity, compute, build]
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Gate on the legs
+        run: |
+          set -euo pipefail
+          echo "parity:  ${{ needs.parity.result }}"
+          echo "compute: ${{ needs.compute.result }} (run=${{ needs.compute.outputs.run }}, legs=${{ needs.compute.outputs.leg_count }})"
+          echo "build:   ${{ needs.build.result }}"
+          if [ "${{ needs.compute.result }}" != "success" ]; then
+            echo "::error::the contract/matrix computation failed"
+            exit 1
+          fi
+          if [ "${{ needs.compute.outputs.run }}" = "true" ] && [ "${{ needs.build.result }}" != "success" ]; then
+            echo "::error::not every ${{ inputs.platform }} leg succeeded: ${{ needs.build.result }}"
+            exit 1
+          fi

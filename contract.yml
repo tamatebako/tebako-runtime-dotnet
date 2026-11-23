@@ -1,0 +1,103 @@
+# Copyright (c) 2026 [Ribose Inc](https://www.ribose.com).
+# All rights reserved.
+# This file is a part of tamatebako
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+# ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+# TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+# PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS
+# BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+# Bootstrap <-> runtime contract version: the versioned protocol between
+# the tebako bootstrap (released from tamatebako/tebako) and the runtime
+# images published from this repo — the env vars passed down, the argv
+# layout, and the filesystem-image handoff. Modeled on
+# tebako-runtime-php's contract.yml (itself the python/ruby factories').
+#
+# This factory has NO contract-1 era: dotnet runtimes exist only in the
+# image era, so contract_version is 2 from the first build (the schema
+# floors it at 2 — contract 1 was the retired v1 C++ tebako-main.cpp
+# grammar this factory never ships). Bump rules mirror the other
+# factories': any change to env/argv/handoff semantics bumps the integer
+# by exactly +1, here and in the consumed driver's compiled-in
+# TEBAKO_CONTRACT_VERSION, in the same commit — scripts/check_contract.rb
+# locks the two (the driver-source parity arm reads the pinned
+# link_unit_release's crates/tebako-driver/src/lib.rs).
+#
+# Schema: schema/contract.schema.yml (validated by the same check).
+---
+contract_version: 2
+
+# The published product line this factory consumes: the tamatebako/tebako
+# release whose prebuilt wrapper exe (tebako-runtime-launcher — the spec-29
+# process entry point with the spec-17 driver embedded), tfs CLI (the
+# in-process imager), and link-unit tarball (the POSIX preload shim the
+# layout's preload_shim grant stages) the legs CONSUME as sha256-verified
+# downloads. This factory has NO source-build path for the driver stack —
+# an empty pin, a missing asset, or a checksum MISMATCH are hard named
+# errors, never a silent fallback (a supply-chain event is reported, not
+# worked around). The asset digests live in `tools:` below.
+#
+# v2.8.83 (2026-11-17) is this factory's first pin: the current product
+# line at skeleton time, carrying the spec-29 wrapper on every shipped
+# platform, the exec-cache visibility tier (spec 22 §6) this runtime
+# declares, and the entry-twin delivery (tebako#831). The pair's artifact
+# names carry the line (tebako-runtime-2.8.83-dotnet-<sdk>-<platform> —
+# the openjdk/node naming grammar), and the release tag convention is the
+# trr one: the tag IS the tebako product line.
+link_unit_release: "v2.8.83"
+
+# The consumed toolchain, per tool-platform: the wrapper exe (the shipped
+# runtime pair's process entry point), the tfs CLI (the imager), and the
+# link-unit tarball (POSIX only — its libtfs_preload rides the image so
+# the jail's host-IO binding survives the exec into the dotnet muxer, the
+# openjdk grammar; the windows image omits the grant).
+#
+# Trust anchors: the wrapper and tfs digests are the release's own
+# SHA256SUMS entries (verified at pin time, cross-checked at fetch time);
+# the link-unit tarballs are NOT in that monolith, so the recorded digest
+# — computed at pin time from the downloaded tarball — is their single
+# anchor (the node/openjdk grammar). Only the platform(s) with build legs
+# carry pins: a pin no leg consumes is config debt, so the other
+# platforms' pins land WITH their legs (README's follow-ups).
+tools:
+  repo: "tamatebako/tebako"
+  sha256:
+    wrapper:
+      linux-gnu-x86_64: "02de83438c43d7f82428e69da9c2da5cf62fd406b0d9a28085511bb1ca164236"
+    tfs:
+      linux-gnu-x86_64: "126777314d562d74b8ff7aacc33256dc2fa0e248e7b6d914eac29679ddd728b2"
+    link-unit:
+      linux-gnu-x86_64: "8f1a32c83ac0dd24146d15111481b2bc7c5724113079c6e4c4032498cc78df9b"
+
+# The .NET SDK version catalog this factory builds (and will publish, once
+# the publish increment lands). The SOURCE PINS (url/sha256 per triplet
+# artifact) live in versions.yml — there is no tamatebako source factory
+# for .NET (Microsoft ships compiled per-RID SDK builds; this factory
+# repacks them), so versions.yml is the source-pin trust anchor;
+# check_contract locks catalog <=> versions.yml (a version in one but not
+# the other is a config bug).
+#
+# Set grammar (tebako-runtime-ruby's semantics, via the php factory):
+#   catalog — every version this factory builds
+#   full    — the tip of every supported line
+#   tidy    — the primary smoke set
+dotnet:
+  catalog: ["10.0.404"]
+  full: ["10.0.404"]
+  tidy: ["10.0.404"]
