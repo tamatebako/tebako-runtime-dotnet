@@ -86,7 +86,9 @@
 #                tar cannot read the .zip SDK archive; the arm64 leg
 #                extracts with the in-box System32 tar.exe), and the
 #                build step runs the openjdk closed PATH (the toolchain
-#                dirs only, plus the hosted ruby's own dir). The PE/ucrt
+#                dirs only, plus the hosted ruby's own dir). Every
+#                bash-grammar step declares shell: bash — the windows
+#                runner's default run shell is pwsh. The PE/ucrt
 #                materialize path IS the boot: exec-cache materializes
 #                the image's tree host-real, and the boot smoke scrubs
 #                every boot's PATH to the Windows system directories
@@ -338,6 +340,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Create folder for runtime packages
+        # shell: bash — the windows runner's default run shell is pwsh;
+        # every bash-grammar step in this job declares bash explicitly
+        # (the php/openjdk grammar: per-step, never a job-wide default).
+        shell: bash
         run: mkdir -p runtime-packages
 
       - name: Cache the verified downloads
@@ -416,6 +422,7 @@ jobs:
       # tar.exe. --tar flows the matrix row's archiver.
       - name: Build the runtime pair (native legs)
         if: matrix.container == null
+        shell: bash
         run: |
           set -euo pipefail
           case "${{ matrix.os }}-${{ matrix.arch }}" in
@@ -459,6 +466,7 @@ jobs:
 
       - name: Boot smoke (native legs)
         if: matrix.container == null
+        shell: bash
         env:
           TEBAKO_RUNTIME_ROOT: runtime-packages
         run: tools/boot_smoke
@@ -469,6 +477,7 @@ jobs:
       # always(), so a red leg's partial packages DO ship as an artifact;
       # the marker is what distinguishes them from a complete leg.
       - name: Mark the leg complete
+        shell: bash
         run: touch runtime-packages/.leg-complete
 
       # The leg's runtime packages, kept for a week as build evidence AND
