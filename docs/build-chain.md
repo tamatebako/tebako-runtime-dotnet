@@ -93,7 +93,8 @@ Stages:
      The build step runs a closed PATH (the toolchain dirs only, plus
      the hosted ruby's own dir — the openjdk grammar; setup-ruby
      publishes no windows-arm64 build, so the legs ride the runners'
-     hosted ruby).
+     hosted ruby). Both legs then run the spec 34 §8.2 signing lane
+     (below) between the build and the boot smoke.
 5. **verify** — the terminal aggregate and the branch-protection gate
    (the build legs are a dynamic matrix whose check names shift with
    the catalog, so protection pins this job's stable check name).
@@ -105,7 +106,10 @@ file, and a parse pass over every authored YAML/JSON.
 There is NO publish stage (the publish pipeline is its own increment):
 the release shard (`<stem>.manifest.json`), the `.sha256` sidecars, and
 the blksum sidecar are already emitted in-leg so the increment is a
-consumption change, never a build-shape change.
+consumption change, never a build-shape change. The windows signing
+lane (below) re-anchors the wrapper's sidecar + shard from the SIGNED
+bytes in-leg, so the future publish ships sign-then-hash by
+construction.
 
 ## The inputs (all pinned, all verified)
 
@@ -177,6 +181,46 @@ pin bump.
    the extracted muxer: the pinned SDK version AND the carried
    Microsoft.NETCore.App version must both answer (a content check,
    never an exit-code check).
+
+## The windows signing lane (spec 34 §8.2)
+
+The python/ruby factories' Azure Trusted Signing lane, mirrored at this
+factory's repack scope, in-leg between the build and the boot smoke —
+so the smoke exercises the SIGNED bytes (the on-platform proof) and the
+upload ships them. Both windows legs arm (`matrix.os == 'windows'` —
+the matrix grammar keys on os, never the arch; x86_64-windows-ucrt and
+aarch64-windows-ucrt alike).
+
+- **Sign target**: exactly ONE host-level PE — the wrapper exe
+  (`<stem>.exe`). The .NET SDK lives INSIDE the `.tfs` env image, so no
+  loose DLL rides the release tier (the jruby grammar, not python's
+  exe+libpython-DLL pair); the in-image PEs are Microsoft's own signed
+  binaries, mounted never extracted.
+- **The arm check** (`ci/windows-sign-gate.sh`, gated on the
+  `WINDOWS_SIGNING_ENABLED` repo variable): armed but a secret/variable
+  unresolved is a fast named failure BEFORE any signing call (spec 34
+  §7.5); gate off, every sign step skips and the leg ships unsigned
+  byte-identically (spec 00 invariant 7 — §7.4 gate-off parity, a loud
+  notice).
+- **The chain**: the sign-staging COPY (the action enumerates by
+  EXTENSION, so only the staged `.exe` is in scope — the `.tfs` and the
+  sidecars never enter `files-folder`) → OIDC `azure/login` in the
+  `windows-signing` environment (the job-level
+  `permissions: {contents: read, id-token: write}` is the OIDC boundary;
+  the environment must NEVER gain required reviewers — every platform's
+  legs share the build job) → the TrustedSigning module preflight →
+  `Azure/artifact-signing-action` (SHA256 digests + the mandatory
+  RFC 3161 countersignature, `http://timestamp.acs.microsoft.com`) →
+  the pwsh verify, which moves the signed bytes BACK over the contract
+  path and runs `signtool verify /pa /v` + `Get-AuthenticodeSignature`
+  (must be Valid with a TimeStamperCertificate) there.
+- **Sign-then-hash (spec 34 §1.3), this factory's shape**: the repack
+  computes the wrapper's `.sha256` sidecar + the release shard's digest
+  INSIDE `tools/build_runtime` (there is no publish-time uploader yet —
+  pre-release), so the verify step RE-ANCHORS both from the signed
+  bytes before the boot smoke and the upload. The shard's recorded
+  filename is checked against the contract name — a stem-computation
+  drift fails closed.
 
 ## The boot smoke (tools/boot_smoke)
 
