@@ -30,8 +30,11 @@ cut**: every increment stays draft-PR-only until the whole chain is
 green end-to-end (the owner's rule).
 
 What is missing, each its own increment (see Follow-ups): the publish
-pipeline + signing + registry render, the Microsoft release monitor,
-the preload-visibility re-evaluation, and the ASP.NET/web workload.
+pipeline + release (OpenPGP) signing + registry render, the Microsoft
+release monitor, the preload-visibility re-evaluation, and the
+ASP.NET/web workload. The in-leg windows Authenticode lane (spec 34
+§8.2, Azure Trusted Signing of the wrapper exe on both windows legs,
+behind `WINDOWS_SIGNING_ENABLED`) already ships.
 
 ## The driver link: the spec-29 wrapper, not a relink, not a custom host
 

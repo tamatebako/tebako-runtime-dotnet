@@ -37,9 +37,20 @@ preflight → build → verify) plus the static gate (`lint.yml`). The
 musl leg builds inside the digest-pinned tpkg-builder container (the
 preflight proves recorded == live); the macos/windows legs are
 runner-native (msys2 ucrt64 bsdtar on windows x64, the in-box
-System32 tar.exe on windows arm64). **No release has been cut** — the
-first release is the owner's explicit act (README's follow-ups name the
-remaining increments: publish+sign+registry next, then the monitor,
+System32 tar.exe on windows arm64). Both windows legs carry the spec 34
+§8.2 Azure Trusted Signing lane in-leg (`ci/windows-sign-gate.sh`'s arm
+check, OIDC `azure/login` in the `windows-signing` environment, the
+RFC 3161 timestamp, and `signtool verify /pa` at the contract path —
+behind the `WINDOWS_SIGNING_ENABLED` gate; gate-off ships unsigned
+byte-identically, spec 00 invariant 7). The sign target is the wrapper
+exe ALONE — the .NET SDK lives inside the env image, so no loose DLL
+rides the release tier — and because this factory's repack grammar
+computes the `.sha256` sidecar + the release shard's digest inside
+`tools/build_runtime` (no publish-time uploader exists yet), the verify
+step re-anchors both from the signed bytes (sign-then-hash, spec 34
+§1.3; docs/build-chain.md). **No release has been cut** — the first
+release is the owner's explicit act (README's follow-ups name the
+remaining increments: publish+registry next, then the monitor,
 the preload re-evaluation, the web workload, the payload lane).
 
 ## Repo-local gotchas
