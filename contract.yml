@@ -121,7 +121,7 @@ container_version: "v1"
 #     "https://ghcr.io/v2/tamatebako/tpkg-builder-<triplet>/manifests/<tag>" | grep -i docker-content-digest
 container_digests:
   tpkg-builder-x86_64-linux-musl:
-    amd64: "sha256:e933e07cc7320b53fd558a3ede20728530bb0b1fbcf8100efc55f5ac80b97e2d"
+    amd64: "sha256:92b952976a36c7ef6cde9a0609549e0dbb3ef304cd79bf4caef3c19f9cb1b185"
 
 # The .NET SDK version catalog this factory builds (and will publish, once
 # the publish increment lands). The SOURCE PINS (url/sha256 per triplet
