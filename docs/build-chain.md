@@ -36,6 +36,38 @@ everything below:
    the exec-cache first-boot materialization (~0.5 GB, content-keyed)
    is the recorded cost.
 
+   **The macOS dyld-stripping plane does not apply to this shape**
+   (tebako#1117's dotnet cell, answered for the day the macOS sign arm
+   lands with the publish increment). The stripping law is governed by
+   the signature of the EXEC TARGET: a hardened-runtime image without
+   `allow-dyld-environment-variables` loses `DYLD_INSERT_LIBRARIES` at
+   exec on macOS 14 (the tebako-runtime-r#5 class). Two targets exist
+   here, and neither's core IO depends on an insertion:
+   - The **wrapper** (`tebako-runtime-launcher`, tebako-signed when the
+     arm lands): the driver's boot-head self-insert fires on macOS, but
+     under exec-cache the wrapper only mounts, materializes, and execs
+     — nothing in its process consumes the interpose dylib, so a
+     stripped insertion costs nothing (the boot continues uninserted,
+     loudly — the product's designed fallback; proven by the same
+     product binary in the openjdk line running green on darwin-23
+     hardened with NO entitlements embedded at all, and by this repo's
+     macos legs, e.g. run 45540251881).
+   - The **muxer** (Microsoft's own bytes, byte-identical from the
+     pinned SDK): its core IO reads the materialized host-real SDK
+     tree — no shim needed. The image's `preload_shim` grant serves
+     only the jail's host-IO binding across the exec, and whether that
+     insertion reaches the muxer is governed by MICROSOFT's signature,
+     never this repo's profile: verified on the pinned
+     10.0.404-osx-arm64 tree — the muxer is hardened-signed by
+     Microsoft Corporation (UBF8T346G9) and carries
+     `allow-dyld-environment-variables` itself, so the insertion is
+     honored even on macOS 14.
+   So the wrapper's future `ci/runtime.entitlements` needs no dyld
+   grant for visibility; the question reopens only if the preload-tier
+   refinement ever lands AND the insertion target changes to a
+   tebako-signed exe (the python/php/r shape), which this repack
+   factory never builds.
+
 ## The staged hierarchy
 
 One reusable workflow, `_build-platform.yml` (the php factory's port at
