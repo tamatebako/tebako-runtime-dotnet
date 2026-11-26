@@ -62,6 +62,13 @@ contract_version: 2
 # trr one: the tag IS the tebako product line.
 link_unit_release: "v2.8.83"
 
+# The release machinery's pin (tebako-release — the publish/sign uploader
+# + signer every runtime factory consumes; tamatebako/tebako-release-tooling
+# is its single owner, ecosystem invariant 10). The Gemfile reads THIS key
+# for its git tag, so a tooling bump is one contract edit, never a second
+# hand-written copy of the machinery (the r factory's grammar).
+release_tooling: "v0.5.3"
+
 # The consumed toolchain, per tool-platform: the wrapper exe (the shipped
 # runtime pair's process entry point), the tfs CLI (the imager), and the
 # link-unit tarball (POSIX only — its libtfs_preload rides the image so

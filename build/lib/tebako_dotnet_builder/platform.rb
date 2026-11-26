@@ -98,6 +98,16 @@ module TebakoDotnetBuilder
         end
       end
 
+      # The inverse lookup (the registry renderer's: a shard's `platform`
+      # is an asset-platform id, the registry row keys the spec 03 §3
+      # triplet — tools/registry_update.rb). Fail-closed: an id the
+      # mapping does not know is a named error, never a silently wrong
+      # registry row.
+      def triplet_for_asset_platform(asset_platform)
+        ASSET_PLATFORMS.key(asset_platform) ||
+          raise(TebakoDotnetBuilder::Error.new("no spec 03 triplet for asset platform '#{asset_platform}'", 112))
+      end
+
       def windows?(triplet)
         triplet.include?("windows")
       end

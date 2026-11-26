@@ -33,30 +33,45 @@ extracted smoke) + `tools/boot_smoke` (the contract scenarios + the
 compute-floor), wired into four thin triggers
 (`build-linux-gnu.yml`, `build-linux-musl.yml`, `build-macos.yml`,
 `build-windows.yml`) over `_build-platform.yml` (parity → compute →
-preflight → build → verify) plus the static gate (`lint.yml`). The
-musl leg builds inside the digest-pinned tpkg-builder container (the
+preflight → build → publish → verify) plus the static gate (`lint.yml`).
+The musl leg builds inside the digest-pinned tpkg-builder container (the
 preflight proves recorded == live); the macos/windows legs are
 runner-native (msys2 ucrt64 bsdtar on windows x64, the in-box
-System32 tar.exe on windows arm64). Both windows legs carry the spec 34
-§8.2 Azure Trusted Signing lane in-leg (`ci/windows-sign-gate.sh`'s arm
-check, OIDC `azure/login` in the `windows-signing` environment, the
-RFC 3161 timestamp, and `signtool verify /pa` at the contract path —
-behind the `WINDOWS_SIGNING_ENABLED` gate; gate-off ships unsigned
-byte-identically, spec 00 invariant 7). The sign target is the wrapper
-exe ALONE — the .NET SDK lives inside the env image, so no loose DLL
-rides the release tier — and because this factory's repack grammar
-computes the `.sha256` sidecar + the release shard's digest inside
-`tools/build_runtime` (no publish-time uploader exists yet), the verify
-step re-anchors both from the signed bytes (sign-then-hash, spec 34
-§1.3; docs/build-chain.md). **No release has been cut** — the first
-release is the owner's explicit act (README's follow-ups name the
-remaining increments: publish+registry next, then the monitor,
-the preload re-evaluation, the web workload, the payload lane).
+System32 tar.exe on windows arm64). Both signing lanes ride in-leg:
+the windows legs carry the spec 34 §8.2 Azure Trusted Signing lane
+(`ci/windows-sign-gate.sh`'s arm check, OIDC `azure/login` in the
+`windows-signing` environment, the RFC 3161 timestamp, and
+`signtool verify /pa` at the contract path — behind the
+`WINDOWS_SIGNING_ENABLED` gate) and the macos legs the spec 31 §5
+Developer ID + notarization arm (`ci/macos-sign-notarize-runtime.sh` +
+`ci/runtime.entitlements`' exec-cache pair — disable-library-validation
++ allow-jit, NO dyld grant, tebako#1117's verdict — behind the
+`APPLE_SIGNING_ENABLED` gate); gate-off ships unsigned byte-identically,
+spec 00 invariant 7. The sign target is the wrapper exe ALONE — the
+.NET SDK lives inside the env image, so no loose DLL/PE rides the
+release tier — and because this factory's repack grammar computes the
+`.sha256` sidecar + the in-leg release shard's digest inside
+`tools/build_runtime`, both lanes re-anchor both from the signed bytes
+(sign-then-hash, spec 34 §1.3; docs/build-chain.md); the publish job's
+gem then renders the SERVED shard/sidecars off the same bytes.
+`publish.yml` is the release coordinator (the r factory's port): per-leg
+publish + OpenPGP sign via the tebako-release gem (pinned at
+`contract.yml release_tooling`, declared by
+`scripts/release_adapter.rb`), the whole-matrix audit, the registry
+render (`tools/registry_update.rb`, composite `<sdk>-<tebako-line>`
+keys) + bot PR, and the installed-pair acceptance on the macOS lanes
+(`tools/boot_smoke --scenario published-pair`). **No release has been
+cut** — the first publish is the owner's explicit act: a `publish.yml`
+dispatch with `publish: true` (README's follow-ups name the remaining
+increments: the monitor, the preload re-evaluation, the web workload,
+the payload lane).
 
 ## Repo-local gotchas
 
-- Tooling is **Ruby** (stdlib-first; gems only via `Gemfile` — today
-  only `json_schemer` for the contract gate). Ecosystem §12 rules
+- Tooling is **Ruby** (stdlib-first; gems only via `Gemfile` —
+  `json_schemer` for the contract gate, `octokit` for the registry
+  render, and the git-pinned `tebako-release` for the publish legs +
+  audit). Ecosystem §12 rules
   apply: autoload only, no `require_relative`, no
   `send`/`instance_variable_get`/`respond_to?` metaprogramming.
 - `Gemfile.lock` is gitignored (factory convention — resolutions float).

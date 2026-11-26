@@ -33,6 +33,19 @@ module TebakoDotnetBuilder
   # builds; there is no source tree to pin against). Every read is a
   # named error on absence.
   class Pins
+    # The one owner of the SDK version grammar (spec 00 §10):
+    # schema/contract.schema.yml's catalog pattern mirrors it (asserted
+    # by the lint gate passing on the same strings), and the
+    # tebako-release gem's package-filename parse interpolates it through
+    # this factory's adapter (scripts/release_adapter.rb) — nothing
+    # re-derives it. SDK_LINE_GRAMMAR_SOURCE stays anchor-free: the gem
+    # wraps the source in its own \A…\z package-name pattern
+    # (uploader.rb's parse_package_filename). The shape is
+    # <major>.<minor>.<feature band><patch digits> (10.0.404 = the 10.0.4xx
+    # band, patch 04) — plain digits/dots, no prerelease labels (a
+    # preview SDK would be its own deliberate increment).
+    SDK_LINE_GRAMMAR_SOURCE = '\d+\.\d+\.\d{3,}'
+
     # One pinned SDK archive: the url, the sha256 the fetch verifies,
     # Microsoft's own published sha512 (the pin-time cross-check
     # anchor), and the .NET RID (the apphost pack name and the boot

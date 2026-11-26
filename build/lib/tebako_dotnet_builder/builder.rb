@@ -30,6 +30,7 @@ require "json"
 require "open3"
 require "time"
 require "tmpdir"
+require "yaml"
 
 module TebakoDotnetBuilder
   # The repack orchestrator (the openjdk tools/build grammar, ported to
@@ -44,10 +45,24 @@ module TebakoDotnetBuilder
   # Outputs land in runtime-packages/ (the boot smoke's
   # TEBAKO_RUNTIME_ROOT grammar): <stem> (the wrapper exe, 0755),
   # <stem>.tfs (+ .sha256 + .blksum.json + .blksum.json.sha256),
-  # <stem>.manifest.json (the release shard), and
+  # <stem>.contract.yaml (the era-2 provenance card the tebako-release
+  # gem folds into the published shard — spec 18 C2),
+  # <stem>.manifest.json (the in-leg release shard), and
   # payload-<triplet>.yaml (the release-tier manifest with the real
   # blob sha).
   class Builder
+    # tebako#716's language segment of the package-name grammar
+    # (`tebako-runtime-<line>-dotnet-<sdk>-<platform>`): ALWAYS "dotnet"
+    # — this factory was born after the flip, so it has no immutable
+    # pre-#716 line to keep composing (the php/r factories' rationale).
+    # The release adapter (scripts/release_adapter.rb) reads the same
+    # constant — nothing re-derives it.
+    LANG_SEGMENT = "dotnet"
+
+    # The era-2 contract card constants (spec 18 C2): what this factory
+    # builds. Written into every package's .contract.yaml sidecar.
+    CONTRACT_CARD = { "contract_era" => 2, "image_layout" => 1 }.freeze
+
     def initialize(repo_root:, version:, triplet:, work_dir: nil, out_dir: nil, tar: "tar")
       @repo_root = repo_root
       @version = version
@@ -63,7 +78,7 @@ module TebakoDotnetBuilder
       line = @contract.tebako_line
       asset_platform = TebakoDotnetBuilder::Platform.asset_platform_for(@triplet)
       exe_suffix = TebakoDotnetBuilder::Platform.exe_suffix_for(@triplet)
-      stem = "tebako-runtime-#{line}-dotnet-#{@version}-#{asset_platform}"
+      stem = "tebako-runtime-#{line}-#{LANG_SEGMENT}-#{@version}-#{asset_platform}"
       source = @pins.source(@version, @triplet)
 
       step("fetch + sha256-verify the .NET SDK #{@version} (#{@triplet})")
@@ -122,6 +137,7 @@ module TebakoDotnetBuilder
       write_sidecar("#{exe}.sha256", exe_sha, "#{stem}#{exe_suffix}")
       write_shard(stem, exe, exe_sha, image, image_sha, blksum, blksum_sha,
                   asset_platform: asset_platform, exe_suffix: exe_suffix, source: source)
+      write_contract_sidecar(exe, asset_platform: asset_platform, exe_suffix: exe_suffix, source: source)
 
       read_back(toolchain.tfs, image)
 
@@ -216,6 +232,33 @@ module TebakoDotnetBuilder
       path = File.join(@out_dir, "#{stem}.manifest.json")
       File.write(path, "#{JSON.pretty_generate(shard)}\n")
       puts "shard: #{path}"
+    end
+
+    # The era-2 contract provenance (spec 18 C2) as
+    # `<exe>.contract.yaml` — the tebako-release gem's uploader refuses a
+    # package without it (fail-closed, S11/S16), folding contract_era /
+    # mount_root / image_layout / built_from into the shard it renders
+    # publish-side (the in-leg shard above stays build evidence; the
+    # release's shard is the gem's render — spec 13 §2a). built_from
+    # names the consumed SDK archive with its verified sha256 and the pin
+    # file that anchored it; the additive link_unit block names the
+    # consumed product release + the wrapper asset (open parse —
+    # consumers that predate the key ignore it).
+    def write_contract_sidecar(exe, asset_platform:, exe_suffix:, source:)
+      card = CONTRACT_CARD.merge(
+        "mount_root" => TebakoDotnetBuilder::Platform.mount_root_for(@triplet),
+        "built_from" => {
+          "pin" => "versions.yml",
+          "sources" => [{ "name" => File.basename(source.url), "sha256" => source.sha256 }]
+        },
+        "link_unit" => {
+          "release" => @contract.link_unit_release,
+          "asset" => "tebako-runtime-launcher-#{@contract.tebako_line}-#{asset_platform}#{exe_suffix}"
+        }
+      )
+      path = "#{exe.sub(/\.exe\z/, "")}.contract.yaml"
+      File.write(path, YAML.dump(card))
+      puts "contract card: #{path}"
     end
 
     # A broken pair fails THIS leg, never a publish step (the openjdk

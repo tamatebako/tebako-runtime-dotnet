@@ -10,7 +10,7 @@
 $schema: "https://json-schema.org/draft/2020-12/schema"
 title: tebako-runtime-dotnet bootstrap <-> runtime contract
 type: object
-required: [contract_version, link_unit_release, tools, container_version, container_digests, dotnet]
+required: [contract_version, link_unit_release, release_tooling, tools, container_version, container_digests, dotnet]
 additionalProperties: false
 properties:
   contract_version:
@@ -22,6 +22,10 @@ properties:
     type: string
     pattern: '^v\d+\.\d+\.\d+$'
     description: the tamatebako/tebako release whose published wrapper exe, tfs CLI, and link-unit tarball the legs consume
+  release_tooling:
+    type: string
+    pattern: '^v\d+\.\d+\.\d+$'
+    description: the tamatebako/tebako-release-tooling tag the Gemfile pins (the release machinery's single owner; consumed by the publish/sign legs and the coordinator's audit)
   container_version:
     type: string
     pattern: '^v\d+'

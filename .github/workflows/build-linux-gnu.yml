@@ -61,8 +61,9 @@ jobs:
     # id-token:write (the windows-signing OIDC boundary) — a reusable
     # workflow can never elevate past the caller's grant, so the grant
     # flows from here. contents:read restates the called workflow's
-    # existing need (a permissions block is the complete set, not an
-    # addition — this factory has no publish job yet).
+    # existing need for a build-only dispatch (a permissions block is
+    # the complete set, not an addition — publish.yml's fan-outs declare
+    # the wider publish grant for their own calls).
     permissions:
       contents: read
       id-token: write

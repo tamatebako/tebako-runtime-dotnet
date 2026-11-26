@@ -25,16 +25,22 @@ implemented in `build/lib/tebako_dotnet_builder/` +
 `tools/build_runtime` + `tools/boot_smoke` and wired into four thin
 triggers (`build-linux-gnu.yml`, `build-linux-musl.yml`,
 `build-macos.yml`, `build-windows.yml`) over `_build-platform.yml`
-(parity → compute → preflight → build → verify). **No release has been
-cut**: every increment stays draft-PR-only until the whole chain is
-green end-to-end (the owner's rule).
+(parity → compute → preflight → build → publish → verify), with
+`publish.yml` as the operator-facing release coordinator (per-leg
+publish + OpenPGP sign via the tebako-release gem, the whole-matrix
+audit, the registry render + bot PR, and the installed-pair acceptance
+on the macOS lanes). **No release has been cut**: the first publish is
+the owner's explicit act — a `publish.yml` dispatch with `publish:
+true`, never the agent's.
 
-What is missing, each its own increment (see Follow-ups): the publish
-pipeline + release (OpenPGP) signing + registry render, the Microsoft
-release monitor, the preload-visibility re-evaluation, and the
-ASP.NET/web workload. The in-leg windows Authenticode lane (spec 34
-§8.2, Azure Trusted Signing of the wrapper exe on both windows legs,
-behind `WINDOWS_SIGNING_ENABLED`) already ships.
+What is missing, each its own increment (see Follow-ups): the first
+release (the owner's act), the Microsoft release monitor, the
+preload-visibility re-evaluation, and the ASP.NET/web workload. The
+in-leg signing lanes already ship: the windows Authenticode lane (spec
+34 §8.2, Azure Trusted Signing of the wrapper exe on both windows legs,
+behind `WINDOWS_SIGNING_ENABLED`) and the macOS Developer ID +
+notarization arm (spec 31 §5, `ci/runtime.entitlements`' exec-cache
+pair, behind `APPLE_SIGNING_ENABLED`).
 
 ## The driver link: the spec-29 wrapper, not a relink, not a custom host
 
@@ -124,14 +130,19 @@ scope change.
   (the tier-1 runtime manifest: kind runtime, engine dotnet, the
   `home: "/"` annotation).
 - `<stem>.tfs.blksum.json` — the lazy-mount digest sidecar (spec 39 §3).
-- Per-asset `.sha256` sidecars (the store's trust-anchor shape) and the
-  `<stem>.manifest.json` release shard (spec 13 §2a's write-once
-  per-leg metadata unit — consumed by the publish increment).
+- Per-asset `.sha256` sidecars (the store's trust-anchor shape), the
+  `<stem>.contract.yaml` era-2 provenance card (spec 18 C2 — the
+  tebako-release gem's required publish input), and the
+  `<stem>.manifest.json` in-leg release shard (spec 13 §2a's write-once
+  per-leg metadata unit — build evidence; the release's shard is the
+  gem's own render off the served bytes).
 
 The `<line>` segment is the tebako product line the pair builds against
 (`2.8.83` at pin time — the openjdk grammar: the release tag IS the
-tebako line). The registry version (when the publish increment lands)
-is the plain SDK version (`10.0.404`).
+tebako line). The registry version is the composite
+`<sdk>-<tebako-line>` (`10.0.404-2.8.83`): one SDK ships on several
+tebako product lines, and the composite keeps every line addressable
+(the r factory's grammar).
 
 ## The flow
 
@@ -153,7 +164,8 @@ dotnet-sdk-<v>-<rid>.tar.gz        tebako-runtime-launcher-<line>-<pid>
                         |
                         v
         pair with the wrapper exe -> .sha256 sidecars
-        + the .manifest.json shard + the blksum sidecar
+        + the .contract.yaml card + the .manifest.json shard
+        + the blksum sidecar
                         |
                         v
         read-back (manifest validates, layout/entrypoint present,
@@ -188,6 +200,15 @@ windows machine carries no mingw/msys toolchain), and the CLI/exec-cache
 roots ride the smoke's scratch via USERPROFILE/TMP/TEMP. The PE/ucrt
 materialize path is the boot under test: exec-cache materializes the
 image's tree host-real and the muxer + hostfxr + coreclr load from it.
+
+Beside the per-leg set, the `published-pair` install scenario serves the
+publish coordinator's acceptance job (tebako-runtime-r#6's shape):
+through the contract-pinned tebako CLI, into a scratch `TEBAKO_HOME` —
+`add-registry` + `install dotnet`, the shim materializes, `dotnet
+--info` answers through it, the console fixture compiles + runs through
+the shim, and the app's RID must name the host's architecture. The
+build-tree smoke cannot see that installed flow; the acceptance gates it
+on the macOS lanes.
 
 ## Matrix grammar
 
@@ -237,6 +258,9 @@ Microsoft's.
   Microsoft's sha512) live in `versions.yml`;
   `scripts/check_contract.rb` cross-locks the two and proves every
   matrix leg's triplet is pinned.
+- `release_tooling` — the tebako-release gem tag the publish legs and
+  the coordinator's audit consume (the Gemfile flows it;
+  tamatebako/tebako-release-tooling is the machinery's single owner).
 
 ## Layout
 
@@ -254,15 +278,30 @@ Microsoft's.
   stage/prune → image → pair → sidecars → read-back → extracted smoke).
 - `tools/boot_smoke` — the post-build acceptance gate (bare/boot/
   compile/dll/compute-floor/bad-mount/mount-root-malformed/
-  override-ungranted).
+  override-ungranted) plus the `published-pair` install scenario (the
+  publish acceptance).
+- `tools/registry_update.rb` — the registry renderer: the release's
+  per-package shards → `tpkg-registry.yaml` (composite
+  `<sdk>-<tebako-line>` keys), landed on main by bot PR.
+- `scripts/release_adapter.rb` — this factory's tebako-release
+  declaration (repo, language, the version grammar through Pins, the
+  "dotnet" language segment through Builder) — the gem's adapter seam.
 - `build/lib/tebako_dotnet_builder/` — the build model (Contract, Pins,
   Platform, Fetcher, Toolchain, ImageBuilder, Builder).
 - `manifests/` — the tier-1 runtime manifest + the layout declaration
   templates the build renders into the image.
+- `ci/` — the signing lanes: `windows-sign-gate.sh` (the spec 34 §4 arm
+  check), `macos-sign-notarize-runtime.sh` + `runtime.entitlements`
+  (the spec 31 §5 arm: Developer ID + hardened runtime + notarization,
+  the exec-cache entitlement pair).
 - `.github/workflows/_build-platform.yml` — the one per-platform
-  workflow (parity → compute → preflight → build → verify), called by
-  the thin triggers (`build-linux-gnu.yml`, `build-linux-musl.yml`,
-  `build-macos.yml`, `build-windows.yml`).
+  workflow (parity → compute → preflight → build → publish → verify),
+  called by the thin triggers (`build-linux-gnu.yml`,
+  `build-linux-musl.yml`, `build-macos.yml`, `build-windows.yml`) and
+  by the release coordinator.
+- `.github/workflows/publish.yml` — the release coordinator: the
+  platform fan-outs, the whole-matrix audit + registry render/bot PR,
+  and the installed-pair acceptance on the macOS lanes.
 - `.github/workflows/lint.yml` — the static gate: schema validation,
   catalog/matrix resolution, the `ruby -c` sweep, YAML/JSON parse
   checks.
@@ -303,11 +342,11 @@ the workflow's grammar.)
 
 ## Follow-ups
 
-1. The publish pipeline (per-leg publish+sign via the tebako-release
-   gem, the audit, the registry render + bot PR) and the first release
-   — the owner's explicit act, never the agent's. This is the next
-   increment; the legs already emit every byte it consumes (the pair,
-   the sidecars, the release shard).
+1. The first release — the owner's explicit act, never the agent's: a
+   `publish.yml` dispatch with `publish: true` (the legs already emit
+   every byte the pipeline consumes; the macOS arm wants the
+   `APPLE_SIGNING_ENABLED` variable + the `APPLE_*` secrets set, exactly
+   like the windows lane's `WINDOWS_SIGNING_ENABLED` grammar).
 2. The Microsoft release monitor (the releases-index watch + pin-bump
    PRs).
 3. The preload-visibility re-evaluation (measurements first; the
@@ -322,5 +361,8 @@ the workflow's grammar.)
    builds, but no leg demands them yet — their increment records the
    pins and adds the matrix rows (the arm64 linux containers exist
    beside the x86_64 one).
-7. The boot-contract parity `spec/` suite against the driver's contract
+7. The installed-pair acceptance on the linux/windows lanes (the
+   `published-pair` scenario rides the macOS lanes first — the
+   installed flow's sharpest edges are theirs).
+8. The boot-contract parity `spec/` suite against the driver's contract
    suite where the cases overlap.
