@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Spec 31 §3/§5: the macOS runtime signing profile (fixed pair, pinned
+  here until spec 31 §2's manifest derivation lands). The exec-cache
+  shape's pair — the tebako-runtime-openjdk profile, with this factory's
+  tebako#1117 verdict recorded (docs/build-chain.md's entitlement-plane
+  paragraph, dotnet#5):
+
+  NO allow-dyld-environment-variables — DELIBERATELY ABSENT, never an
+    omission. The dyld-stripping plane (tebako-runtime-r#5's class: a
+    hardened exe whose re-exec needs DYLD_INSERT_LIBRARIES for core IO
+    visibility dies shimless on macOS 14 without the grant) does not
+    reach the exec-cache shape. The wrapper only mounts, materializes,
+    and execs — nothing in its process consumes the interpose dylib, and
+    a stripped self-insert is the product's designed loud fallback
+    (proven: the same product binary in the openjdk line runs green on
+    darwin-23 hardened with NO entitlements at all). The insertion that
+    DOES matter — the preload shim's jail binding across the exec into
+    the muxer — is governed by MICROSOFT's signature on the muxer (the
+    pinned SDK's dotnet is hardened-signed and carries
+    allow-dyld-environment-variables itself), never by this profile.
+  disable-library-validation — every runtime slice: a hardened-runtime
+    process by default refuses unsigned dylibs, and the driver
+    materializes in-image native objects (the preload shim
+    libtfs_preload.dylib) to the host for dlopen/injection; they carry
+    no Developer ID signature of their own (§1.4). This grant governs
+    only WHICH dylibs may load — it says nothing about WHETHER dyld
+    honors the environment (the conflation that shipped the
+    tebako-runtime-r#5 class).
+  allow-jit — a grant, never a requirement: the wrapper never JITs
+    (CoreCLR's JIT runs in the exec'd muxer process, under Microsoft's
+    own signature and entitlements). The pair rides the exe so a future
+    line never needs a profile re-review.
+
+  Keep the two <true/> values on their own lines: the embedding check
+  in ci/macos-sign-notarize-runtime.sh counts them (macOS 15 emits the
+  embedded plist single-line, so it greps for <true/>, not key names).
+-->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+</dict>
+</plist>

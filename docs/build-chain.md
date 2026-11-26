@@ -37,14 +37,15 @@ everything below:
    is the recorded cost.
 
    **The macOS dyld-stripping plane does not apply to this shape**
-   (tebako#1117's dotnet cell, answered for the day the macOS sign arm
-   lands with the publish increment). The stripping law is governed by
-   the signature of the EXEC TARGET: a hardened-runtime image without
+   (tebako#1117's dotnet cell — the verdict the macOS sign arm below
+   ships). The stripping law is governed by the signature of the EXEC
+   TARGET: a hardened-runtime image without
    `allow-dyld-environment-variables` loses `DYLD_INSERT_LIBRARIES` at
    exec on macOS 14 (the tebako-runtime-r#5 class). Two targets exist
    here, and neither's core IO depends on an insertion:
-   - The **wrapper** (`tebako-runtime-launcher`, tebako-signed when the
-     arm lands): the driver's boot-head self-insert fires on macOS, but
+   - The **wrapper** (`tebako-runtime-launcher`, tebako-signed under
+     the arm below): the driver's boot-head self-insert fires on macOS,
+     but
      under exec-cache the wrapper only mounts, materializes, and execs
      — nothing in its process consumes the interpose dylib, so a
      stripped insertion costs nothing (the boot continues uninserted,
@@ -62,10 +63,10 @@ everything below:
      Microsoft Corporation (UBF8T346G9) and carries
      `allow-dyld-environment-variables` itself, so the insertion is
      honored even on macOS 14.
-   So the wrapper's future `ci/runtime.entitlements` needs no dyld
-   grant for visibility; the question reopens only if the preload-tier
-   refinement ever lands AND the insertion target changes to a
-   tebako-signed exe (the python/php/r shape), which this repack
+   So the wrapper's `ci/runtime.entitlements` pair (below) carries no
+   dyld grant for visibility; the question reopens only if the
+   preload-tier refinement ever lands AND the insertion target changes
+   to a tebako-signed exe (the python/php/r shape), which this repack
    factory never builds.
 
 ## The staged hierarchy
@@ -97,8 +98,9 @@ Stages:
    before any leg spends compute. A retagged toolchain container under
    an unchanged tag fails HERE, never mid-leg.
 4. **build** — one leg per (.NET SDK × arch): `tools/build_runtime` →
-   `tools/boot_smoke` → the `runtime-packages-<os>-<arch>-<dotnet>`
-   artifact. Leg shapes:
+   the in-leg signing lanes (macos: spec 31's sign + notarize; windows:
+   spec 34 §8.2's lane) → `tools/boot_smoke` → the
+   `runtime-packages-<os>-<arch>-<dotnet>` artifact. Leg shapes:
    - **linux-gnu** — runner-native on ubuntu-24.04 (its image carries
      ruby, libicu74, libssl3: the muxer's own deps).
    - **linux-musl** — the container-leg idiom (the php/openjdk
@@ -117,7 +119,9 @@ Stages:
      invocation — the php/ruby factories ride
      `MACOSX_DEPLOYMENT_TARGET` through their whole build) and a repack
      compiles nothing; the wrapper exe + tfs CLI carry the product
-     repo's floor, Microsoft's binaries carry Microsoft's.
+     repo's floor, Microsoft's binaries carry Microsoft's. Both legs
+     then run the spec 31 §5 sign + notarize arm (below) between the
+     build and the boot smoke.
    - **windows** — runner-native on the openjdk ucrt idiom: the x64 leg
      (windows-latest) sets up msys2 ucrt64 for bsdtar (GNU tar cannot
      read the `.zip` SDK archive); the arm64 leg (windows-11-arm)
@@ -127,21 +131,52 @@ Stages:
      publishes no windows-arm64 build, so the legs ride the runners'
      hosted ruby). Both legs then run the spec 34 §8.2 signing lane
      (below) between the build and the boot smoke.
-5. **verify** — the terminal aggregate and the branch-protection gate
+5. **publish** — gated on the coordinator's `publish` input (never on
+   the build triggers): one job per leg, re-downloading the leg's
+   immutable in-run artifact and publishing it through the
+   tebako-release gem (pinned at `contract.yml release_tooling`,
+   declared by `scripts/release_adapter.rb`) — the payload assets +
+   the gem-rendered shard and sidecars, write-once per-leg names (spec
+   13 §2a's de-rendezvous, tebako-runtime-ruby#161/#190) — then the
+   gem's OpenPGP signer over every served name (spec 09 §5), then SLSA
+   L3 provenance. The gem's publishable set accepts only payload
+   assets + its known sidecars, so the in-leg shard +
+   `payload-<triplet>.yaml` stage aside as build evidence first — the
+   release's metadata is the gem's render off the served (signed)
+   bytes, never a hand-off.
+6. **verify** — the terminal aggregate and the branch-protection gate
    (the build legs are a dynamic matrix whose check names shift with
-   the catalog, so protection pins this job's stable check name).
+   the catalog, so protection pins this job's stable check name). On
+   publish runs it gates on the publish legs too
+   (tebako-runtime-ruby#190); audit runs (publish.yml's audit mode)
+   build nothing and skip it.
 
 `lint.yml` is the static gate (no builds): the same contract check, the
 catalog/matrix resolution, a `ruby -c` sweep over every authored ruby
 file, and a parse pass over every authored YAML/JSON.
 
-There is NO publish stage (the publish pipeline is its own increment):
-the release shard (`<stem>.manifest.json`), the `.sha256` sidecars, and
-the blksum sidecar are already emitted in-leg so the increment is a
-consumption change, never a build-shape change. The windows signing
-lane (below) re-anchors the wrapper's sidecar + shard from the SIGNED
-bytes in-leg, so the future publish ships sign-then-hash by
-construction.
+The publish pipeline rides the same two files: `_build-platform.yml`
+gains the per-leg `publish` job (above) behind the `publish`/`audit`
+workflow_call inputs, and `publish.yml` is the operator-facing
+coordinator (the r factory's port): a `force_rebuild` prepare-release
+(tebako-runtime-ruby#189), the four platform fan-outs, then ONE release
+job — the whole-matrix AUDIT (the gem's uploader under `AUDIT_ONLY`,
+read-only) and the registry render (`tools/registry_update.rb`, off the
+release's own shards — spec 04 §2's mirror) landed on main by bot PR +
+auto-merge, followed by the official aggregate's nudge and the versions
+catalog's ping. The registry keys are the composite `<sdk>-<tebako>`
+grammar (one SDK ships on several tebako product lines — this factory's
+release tag IS the pinned product line; the composite keeps every line
+addressable). The `acceptance-macos` job closes a publish run
+(tebako-runtime-r#6's coverage): per macos arch, the contract-pinned
+tebako CLI installs the registry default's pair into a scratch
+`TEBAKO_HOME` and `tools/boot_smoke --scenario published-pair` executes
+it — the build-tree smoke cannot see the installed flow. The release
+shard (`.manifest.json`), the `.sha256` sidecars, the era-2
+`.contract.yaml` card (the gem's required provenance sidecar), and the
+blksum sidecar are emitted in-leg by construction; the signing lanes
+(below) re-anchor the wrapper's sidecar + shard from the SIGNED bytes
+in-leg, so the publish ships sign-then-hash by construction.
 
 ## The inputs (all pinned, all verified)
 
@@ -247,12 +282,58 @@ aarch64-windows-ucrt alike).
   path and runs `signtool verify /pa /v` + `Get-AuthenticodeSignature`
   (must be Valid with a TimeStamperCertificate) there.
 - **Sign-then-hash (spec 34 §1.3), this factory's shape**: the repack
-  computes the wrapper's `.sha256` sidecar + the release shard's digest
-  INSIDE `tools/build_runtime` (there is no publish-time uploader yet —
-  pre-release), so the verify step RE-ANCHORS both from the signed
-  bytes before the boot smoke and the upload. The shard's recorded
-  filename is checked against the contract name — a stem-computation
-  drift fails closed.
+  computes the wrapper's `.sha256` sidecar + the in-leg release shard's
+  digest INSIDE `tools/build_runtime`, so the verify step RE-ANCHORS
+  both from the signed bytes before the boot smoke and the upload —
+  the leg's build evidence stays byte-truthful, and the publish job's
+  gem renders its SERVED shard/sidecars off these same bytes. The
+  shard's recorded filename is checked against the contract name — a
+  stem-computation drift fails closed.
+
+## The macOS signing arm (spec 31 §5/§8.4)
+
+The php factory's lane, mirrored at this factory's repack scope, in-leg
+between the build and the boot smoke — so the smoke exercises the exact
+SIGNED bytes (the script leaves the exe quarantine-marked: the boot runs
+under Gatekeeper's download path) and the publish anchors them too
+(sign-then-hash, spec 34 §1.3). Both macos legs arm
+(`matrix.os == 'macos'`).
+
+- **Sign target**: exactly ONE Mach-O — the wrapper exe (`<stem>`, no
+  suffix). The .NET SDK lives INSIDE the `.tfs` env image, so no loose
+  dylib rides the release tier; the in-image binaries are Microsoft's
+  own signed bytes, mounted never extracted.
+- **The gate**: the repo variable `APPLE_SIGNING_ENABLED=true` arms;
+  anything else ships unsigned BY DESIGN (spec 00 invariant 7 — a loud
+  notice, exit 0). Armed + an unresolved `APPLE_*` secret is a fast
+  named failure before any signing call — never a partial release.
+- **The chain** (`ci/macos-sign-notarize-runtime.sh`): a throwaway
+  keychain + the Developer ID Application identity (by cert SHA-1,
+  never by name) → `codesign --options runtime --timestamp` with
+  `ci/runtime.entitlements` → the notarytool submit (`--wait`) against
+  the App Store Connect key → the online-ticket poll
+  (`codesign --check-notarization`; the ticket service lags the
+  submission status by minutes — the ruby factory's bounded-retry
+  lesson) → the quarantine mark. Bare Mach-O keeps an online ticket:
+  stapling is unsupported and `spctl` rejects bare CLI tools by design,
+  so the documented verification is codesign's notarization check.
+- **The entitlement pair** (`ci/runtime.entitlements`):
+  `disable-library-validation` (the driver materializes in-image native
+  objects — the preload shim — to the host for dlopen/injection; a
+  hardened process refuses unsigned dylibs without the grant) +
+  `allow-jit` (a grant, never a requirement — CoreCLR's JIT runs in the
+  exec'd muxer under Microsoft's own signature). NO
+  `allow-dyld-environment-variables` — DELIBERATELY absent: the
+  dyld-stripping plane does not reach the exec-cache shape (the shape
+  decision above, tebako#1117's verdict). The script asserts the
+  embedded profile STATICALLY — the `<true/>` count AND each key by
+  name — because no CI runner can police a missing or swapped grant at
+  exec time (the tebako-runtime-r#5 class: macOS 15's dyld tolerates
+  the omission and serves the shim anyway).
+- **The re-anchor**: the lane's mirror of the windows verify step —
+  the wrapper's `.sha256` sidecar + the in-leg shard re-hash from the
+  signed bytes, before the boot smoke and the upload (armed legs only;
+  a gate-off leg's bytes never changed).
 
 ## The boot smoke (tools/boot_smoke)
 
@@ -296,6 +377,19 @@ the PE/ucrt materialize path IS the boot under test:
 - `override-ungranted` — an absolute `TEBAKO_MOUNT_ROOT` against the
   dotnet image exits 78 (the image grants no override — the closed
   default).
+
+The install scenarios live beside the per-leg set but never ride a
+build leg (they drive the REAL install machinery, not the freshly
+built pair): `published-pair` — the publish coordinator's acceptance
+(tebako-runtime-r#6's shape). Through the contract-pinned tebako CLI
+(`--tebako`) and into a scratch `TEBAKO_HOME`: `add-registry` (this
+factory's live registry — `--registry` overrides), `install dotnet`
+(the registry default), the shim materializes, `dotnet --info` answers
+through it (the SDK band the fixture targets is DISCOVERED from the
+answer, never assumed), the hello/console fixture compiles +
+`dotnet run`s through the shim (MSBuild + Roslyn + the offline
+framework resolution, installed shape), and the app's own RID must
+name the host's architecture (the emulation tripwire).
 
 Every scenario runs with a scrubbed env (no inherited `TEBAKO_*` /
 `DOTNET_*` / `LD_*` / `DYLD_*`), a scratch HOME + NuGet cache, and a
@@ -348,6 +442,23 @@ mkimage convention), so a local build is deterministic too.
 - The triplet ↔ asset-platform ↔ RID grammar:
   `build/lib/tebako_dotnet_builder/platform.rb` (mirroring tpkg's
   owner-side tables).
+- The SDK version grammar:
+  `build/lib/tebako_dotnet_builder/pins.rb`
+  (`SDK_LINE_GRAMMAR_SOURCE` — the contract schema mirrors it; the
+  tebako-release gem's package-name parse flows it through
+  `scripts/release_adapter.rb`).
+- The package-name grammar's language segment (`tebako#716`, always
+  "dotnet"): `Builder::LANG_SEGMENT` — the build stem and the release
+  adapter read the one constant.
+- The release machinery pin: `contract.yml release_tooling` (the
+  Gemfile flows it; tamatebako/tebako-release-tooling is the
+  machinery's single owner — `scripts/release_adapter.rb` declares
+  this factory's identity through the gem's adapter seam, never a
+  copy of the machinery).
+- The runtime registry: `tpkg-registry.yaml`, owned by
+  `tools/registry_update.rb` (rendered off the release's own shards;
+  landed on main by bot PR — never hand-edited beyond
+  `status: withdrawn` marks).
 - The prune policy: `build/lib/tebako_dotnet_builder/image_builder.rb`.
 - The boot-contract scenarios + the compute-floor ceilings:
   `tools/boot_smoke`.

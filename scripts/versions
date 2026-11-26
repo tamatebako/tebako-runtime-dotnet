@@ -36,7 +36,7 @@
 #   scripts/versions --filter SPEC       # full | tidy | catalog | "10.0.404,10.0.500"
 #   scripts/versions --pin KEY           # a top-level pin's raw value
 #                                        # (link_unit_release | contract_version |
-#                                        #  container_version)
+#                                        #  container_version | release_tooling)
 #
 # Named errors, exit 64 — an unknown set keyword or version is a usage
 # error, never a silently empty set.
