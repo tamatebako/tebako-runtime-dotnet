@@ -481,7 +481,7 @@ def published_pair_checks(tebako, registry, home)
   # actually installed.
   out, err, st = Open3.capture3(env, shim, "--info")
   expect_ok("published-pair: dotnet --info answers through the shim", out, err, st, ".NET SDK")
-  band = out[/^Version:\s+(\d+\.\d+)\.\d+/, 1]
+  band = out[/^\s*Version:\s+(\d+\.\d+)\.\d+/, 1]
   unless st&.exitstatus&.zero? && band
     puts "boot_smoke: --info named no SDK band — the console probe has no fixture line"
     exit 143
