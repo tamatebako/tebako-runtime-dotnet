@@ -375,8 +375,11 @@ jobs:
           # while the matrix builds): the in-tree render would abort the
           # branch checkout below. The temp copy is the payload — discard
           # the dirty tree before branching, restore after (the ruby
-          # coordinator's fix, mirrored).
-          git checkout -- tpkg-registry.yaml
+          # coordinator's fix, mirrored). First-publish carve-out: a
+          # factory that has never published has no tpkg-registry.yaml on
+          # main — checkout would die on the pathspec, so the discard is
+          # a plain rm there (the render is untracked either way).
+          git checkout -- tpkg-registry.yaml 2>/dev/null || rm -f tpkg-registry.yaml
           branch="publish/v${TEBAKO_VERSION}-registry"
           git checkout -b "$branch" origin/main
           cp "$RUNNER_TEMP/registry.yaml" tpkg-registry.yaml
