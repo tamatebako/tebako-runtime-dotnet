@@ -383,7 +383,14 @@ jobs:
           branch="publish/v${TEBAKO_VERSION}-registry"
           git checkout -b "$branch" origin/main
           cp "$RUNNER_TEMP/registry.yaml" tpkg-registry.yaml
-          if git diff --quiet origin/main -- tpkg-registry.yaml; then
+          # The unchanged check must name the first-publish case: git diff
+          # compares TRACKED content only, so a brand-new registry (untracked
+          # here, absent on main) diffs empty against origin/main and the
+          # early-exit would skip the commit entirely (the v2.8.83
+          # registry_only run 45860022466 exited "unchanged" with no
+          # registry on main). Unchanged = the file EXISTS on main AND
+          # matches; anything else is a change.
+          if git cat-file -e origin/main:tpkg-registry.yaml 2>/dev/null && git diff --quiet origin/main -- tpkg-registry.yaml; then
             echo "registry unchanged (or the entries already landed on main)"
             exit 0
           fi
