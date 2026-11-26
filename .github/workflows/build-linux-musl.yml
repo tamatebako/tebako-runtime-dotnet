@@ -60,12 +60,16 @@ jobs:
     # Spec 34 §3/§8.2: the called workflow's build job declares
     # id-token:write (the windows-signing OIDC boundary) — a reusable
     # workflow can never elevate past the caller's grant, so the grant
-    # flows from here. contents:read restates the called workflow's
-    # existing need for a build-only dispatch (a permissions block is
-    # the complete set, not an addition — publish.yml's fan-outs declare
-    # the wider publish grant for their own calls).
+    # flows from here. The publish job's spec 13 §2a grant (contents:
+    # write + attestations: write) rides the same rule: GitHub validates
+    # the callee's every job against THIS block at startup, so a caller
+    # granting less fails the run before any job starts — even though
+    # this dispatch never arms publish (the job's own if skips it; the
+    # grant stays latent here and is exercised only by publish.yml's
+    # fan-outs).
     permissions:
-      contents: read
+      contents: write
+      attestations: write
       id-token: write
     with:
       platform: linux-musl
