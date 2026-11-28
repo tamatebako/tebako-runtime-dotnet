@@ -60,7 +60,12 @@ contract_version: 2
 # names carry the line (tebako-runtime-2.8.83-dotnet-<sdk>-<platform> —
 # the openjdk/node naming grammar), and the release tag convention is the
 # trr one: the tag IS the tebako product line.
-link_unit_release: "v2.8.83"
+#
+# v2.8.86 (2026-11-28): Rule E5 (the spawn app-dir materialization sweep,
+# tebako#1141) ships in this line's embedded driver — a framework-dependent
+# .NET entry's runtimeconfig/deps siblings ride the sweep beside the dll
+# (hello-dotnet's press-time check, tebako-packages/hello-runtimes#44).
+link_unit_release: "v2.8.86"
 
 # The release machinery's pin (tebako-release — the publish/sign uploader
 # + signer every runtime factory consumes; tamatebako/tebako-release-tooling
