@@ -45,6 +45,28 @@ payloads:
         sha256: 358b2d3b38c98b57cef9127b50f694d8e935a71961c8ca58378c2ff5ef48026f
     release:
       ref: tfs:github:tamatebako/tebako-runtime-dotnet:v2.8.83
+  - version: 10.0.404-2.8.86
+    platforms:
+      aarch64-macos:
+        artifact: tebako-runtime-2.8.86-dotnet-10.0.404-macos-arm64.tfs
+        sha256: 775d7b3aa28093071a901f81fd76b61bada0f7c3430b786973ea3a77a623b7e2
+      aarch64-windows-ucrt:
+        artifact: tebako-runtime-2.8.86-dotnet-10.0.404-windows-ucrt-arm64.tfs
+        sha256: 27710f4ee4a8cec3fa57ae81d83d39712c6fa24023e06bb60e51263ab3fdcd14
+      x86_64-linux-gnu:
+        artifact: tebako-runtime-2.8.86-dotnet-10.0.404-linux-gnu-x86_64.tfs
+        sha256: 5eb4e0edf73398009f4c72404dd67f2161caf8cbd5ff1f8ae5e48da759311781
+      x86_64-linux-musl:
+        artifact: tebako-runtime-2.8.86-dotnet-10.0.404-linux-musl-x86_64.tfs
+        sha256: 5a260c1f378bec6316da994ff785ffa0d76f6c67d609dda8d0af8d790d4850ca
+      x86_64-macos:
+        artifact: tebako-runtime-2.8.86-dotnet-10.0.404-macos-x86_64.tfs
+        sha256: 9acbf1e9c8f4ba91a024766a817495e24f33cbaf10a60e4f91ed8e02cad4c374
+      x86_64-windows-ucrt:
+        artifact: tebako-runtime-2.8.86-dotnet-10.0.404-windows-ucrt64.tfs
+        sha256: 6d0f7231cb4c50da8fd2b7d67508c6708526301953d6d0592f8fa6105af3fc4c
+    release:
+      ref: tfs:github:tamatebako/tebako-runtime-dotnet:v2.8.86
   engine: dotnet
   implementation: dotnet
-  default: 10.0.404-2.8.83
+  default: 10.0.404-2.8.86
